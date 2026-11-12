@@ -48,7 +48,7 @@ Environment variables:
 | `WEBSITE_ORIGIN` | Optional: the website's address, e.g. `https://healinghubpharmacy.vercel.app`, to allow only it to read the feed (defaults to any site) |
 | `PHARMACY_UTC_OFFSET` | Optional, default `2` (Lesotho) |
 
-On Vercel, import the repository; `app.py` exposes the Flask `app`. Locally:
+On Vercel, import the repository. `vercel.json` tells Vercel this is a Flask app: it builds `app.py` with the Python runtime, sends every request to it, and includes the `templates/` folder. Set `MONGODB_URI` and `SECRET_KEY` before the first deploy — without `SECRET_KEY` the app refuses to start, and without a reachable database every request waits up to two minutes. Locally:
 
 ```bash
 pip install -r requirements.txt
