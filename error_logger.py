@@ -19,6 +19,9 @@ from flask import request, jsonify, render_template_string
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
 
+# Same setting as app.py: the Healing Hub database, never the NMC one.
+DB_NAME = os.getenv("MONGODB_DB", "healing_hub")
+
 # --------------------------------------------------------------------------- #
 # Configuration (adjust if you keep the file elsewhere)
 # --------------------------------------------------------------------------- #
@@ -143,7 +146,7 @@ def write_app_warning(warning_type, message, context=None):
     try:
         uri = MONGO_URI or os.getenv("MONGODB_URI") or "mongodb://localhost:27017/"
         client = MongoClient(uri, serverSelectionTimeoutMS=10000)
-        client["pharmacy_db"][WARNING_COLLECTION].insert_one(doc)
+        client[DB_NAME][WARNING_COLLECTION].insert_one(doc)
     except Exception as e:
         try:
             logging.getLogger("error_logger").warning(f"Failed to write app warning to MongoDB: {e}")
@@ -195,7 +198,7 @@ def init_error_logging(flask_app):
         # Log to MongoDB (fire-and-forget)
         try:
             client = _get_mongo_client(flask_app)
-            db = client["pharmacy_db"]
+            db = client[DB_NAME]
             _log_to_mongo(db, (exc_type, exc_value, exc_tb))
         except Exception as mongo_log_err:
             # FIX: previously only caught ServerSelectionTimeoutError, so any

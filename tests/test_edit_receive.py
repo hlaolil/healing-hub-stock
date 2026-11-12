@@ -20,7 +20,7 @@ import app as A
 A.get_mongo_client = lambda _client=_f: _client
 A.init_db_collections()
 from test_support import arm_csrf
-db = _f['pharmacy_db']
+db = _f['healing_hub']
 meds, txs, dels, audit = db['medications'], db['transactions'], db['deliveries'], db['audit_log']
 c = A.app.test_client()
 arm_csrf(c)

@@ -18,7 +18,7 @@ import app as A
 A.get_mongo_client = lambda _client=_fake: _client
 A.init_db_collections()
 
-db = _fake['pharmacy_db']
+db = _fake['healing_hub']
 meds = db['medications']
 txs = db['transactions']
 client = A.app.test_client()

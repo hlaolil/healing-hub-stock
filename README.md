@@ -43,6 +43,7 @@ Environment variables:
 | Variable | Purpose |
 | --- | --- |
 | `MONGODB_URI` | MongoDB Atlas connection string |
+| `MONGODB_DB` | Database name, default `healing_hub`. The app refuses `pharmacy_db` (the NMC clinic's database), so the two apps can share one Atlas cluster without sharing data |
 | `SECRET_KEY` | Long random string; the app refuses to start without it |
 | `ADMIN_PASSWORD` | Needed to open the Register page and create accounts |
 | `WEBSITE_ORIGIN` | Optional: the website's address, e.g. `https://healinghubpharmacy.vercel.app`, to allow only it to read the feed (defaults to any site) |

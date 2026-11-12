@@ -13,7 +13,7 @@ import app as A
 # the database for the rest of the run.
 A.get_mongo_client = lambda _client=_f: _client
 A.init_db_collections()
-db = _f['pharmacy_db']
+db = _f['healing_hub']
 meds, txs, dels = db['medications'], db['transactions'], db['deliveries']
 c = A.app.test_client()
 

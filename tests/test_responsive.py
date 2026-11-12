@@ -19,7 +19,7 @@ pymongo.MongoClient = lambda *a, **k: _f
 import app as A
 A.get_mongo_client = lambda _client=_f: _client
 A.init_db_collections()
-db = _f['pharmacy_db']
+db = _f['healing_hub']
 meds, txs = db['medications'], db['transactions']
 c = A.app.test_client()
 # The app refuses a POST without its CSRF token; this makes the

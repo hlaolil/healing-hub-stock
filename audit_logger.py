@@ -9,7 +9,7 @@ from bson import ObjectId  # FIX: was missing, caused NameError in audit_delete_
 from flask import request, session, current_app
 
 MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
-DB_NAME     = 'pharmacy_db'
+DB_NAME     = os.getenv('MONGODB_DB', 'healing_hub')
 COLLECTION  = 'audit_log'
 
 def get_mongo_client():

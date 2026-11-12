@@ -254,6 +254,14 @@ ACCOUNT_MAX_AGE_DAYS = 730
 # -----------------------------------------------------------------------
 _mongo_client: MongoClient | None = None
 
+# Healing Hub keeps its own database. It must never share the NMC clinic's
+# 'pharmacy_db', even when both apps use the same Atlas cluster.
+DB_NAME = os.getenv('MONGODB_DB', 'healing_hub')
+if DB_NAME == 'pharmacy_db':
+    raise RuntimeError("MONGODB_DB is 'pharmacy_db', the NMC clinic database. "
+                       "Use a separate database for Healing Hub (default: healing_hub).")
+
+
 def get_mongo_client() -> MongoClient:
     global _mongo_client
     if _mongo_client is None:
@@ -279,7 +287,7 @@ def get_mongo_client() -> MongoClient:
 def init_db_collections() -> None:
     try:
         client = get_mongo_client()
-        db = client['pharmacy_db']
+        db = client[DB_NAME]
         existing = db.list_collection_names()
 
         if 'audit_log' not in existing:
@@ -582,7 +590,7 @@ def login() -> ResponseReturnValue:
             return redirect('/login')
         try:
             client = get_mongo_client()
-            db = client['pharmacy_db']
+            db = client[DB_NAME]
             users = db['users']
             user_doc = users.find_one({'username': username})
             if user_doc and check_password_hash(user_doc['password_hash'], password):
@@ -686,7 +694,7 @@ def change_expired_password() -> ResponseReturnValue:
         else:
             try:
                 client = get_mongo_client()
-                db = client['pharmacy_db']
+                db = client[DB_NAME]
                 users = db['users']
                 username = session['user']['login']
                 user_doc = users.find_one({'username': username})
@@ -740,7 +748,7 @@ def register() -> ResponseReturnValue:
                 return redirect('/register')
             try:
                 client = get_mongo_client()
-                db = client['pharmacy_db']
+                db = client[DB_NAME]
                 users = db['users']
                 existing = users.find_one({'username': username})
 
@@ -905,7 +913,7 @@ def _sale_lines_from_form(form: Any) -> tuple[list[tuple[str, int]], str | None]
 def pos_products() -> ResponseReturnValue:
     """Everything sellable, for the till's item picker: price, stock, Rx flag."""
     try:
-        meds = get_mongo_client()['pharmacy_db']['medications'].find(
+        meds = get_mongo_client()[DB_NAME]['medications'].find(
             _active(), {'_id': 0, 'name': 1, 'selling_price': 1, 'balance': 1,
                         'rx_only': 1, 'schedule': 1})
         return jsonify([{
@@ -930,7 +938,7 @@ def sell() -> ResponseReturnValue:
                                payment_methods=PAYMENT_METHODS, form={})
     form = request.form
     try:
-        db = get_mongo_client()['pharmacy_db']
+        db = get_mongo_client()[DB_NAME]
         medications, transactions = db['medications'], db['transactions']
         current_user = session['user']['name']
 
@@ -1091,7 +1099,7 @@ def write_off() -> ResponseReturnValue:
     flashed = get_flashed_messages()
     message = flashed[0] if flashed else None
     try:
-        db = get_mongo_client()['pharmacy_db']
+        db = get_mongo_client()[DB_NAME]
         medications, transactions = db['medications'], db['transactions']
         if request.method == 'POST':
             name = (request.form.get('med_name') or '').strip()
@@ -1146,7 +1154,7 @@ def write_off() -> ResponseReturnValue:
 @app.route('/sales/<receipt_no>', methods=['GET'])
 @login_required
 def receipt(receipt_no: str) -> ResponseReturnValue:
-    sale = get_mongo_client()['pharmacy_db']['sales'].find_one({'receipt_no': receipt_no})
+    sale = get_mongo_client()[DB_NAME]['sales'].find_one({'receipt_no': receipt_no})
     if not sale:
         flash(f'No sale with receipt number {receipt_no}.', 'error')
         return redirect(url_for('sales'))
@@ -1161,7 +1169,7 @@ def receipt(receipt_no: str) -> ResponseReturnValue:
 @login_required
 def sales() -> ResponseReturnValue:
     """Sales list and cash-up: totals by payment method for the chosen days."""
-    db = get_mongo_client()['pharmacy_db']
+    db = get_mongo_client()[DB_NAME]
     start_date = request.args.get('start_date') or ''
     end_date = request.args.get('end_date') or ''
     search = (request.args.get('search') or '').strip()
@@ -1366,7 +1374,7 @@ def _reconcile_delivery(delivery: Doc, goods_value: float) -> Doc:
 def receive() -> ResponseReturnValue:
     try:
         client = get_mongo_client()
-        db = client['pharmacy_db']
+        db = client[DB_NAME]
         medications = db['medications']
         transactions = db['transactions']
         deliveries = db['deliveries']
@@ -1618,7 +1626,7 @@ def add_medication() -> ResponseReturnValue:
         return redirect('/reports')
     try:
         client = get_mongo_client()
-        db = client['pharmacy_db']
+        db = client[DB_NAME]
         medications = db['medications']
         transactions = db['transactions']
         message = None
@@ -1716,7 +1724,7 @@ def edit_medication() -> ResponseReturnValue:
         return redirect('/reports')
     try:
         client = get_mongo_client()
-        db = client['pharmacy_db']
+        db = client[DB_NAME]
         medications = db['medications']
         message = None
 
@@ -1822,7 +1830,7 @@ def delete_medication() -> ResponseReturnValue:
         return redirect('/reports')
     try:
         client = get_mongo_client()
-        db = client['pharmacy_db']
+        db = client[DB_NAME]
         medications = db['medications']
         med = medications.find_one({'name': med_name})
         if not med:
@@ -2027,7 +2035,7 @@ def edit_loss() -> ResponseReturnValue:
                                 start_date=start_date, end_date=end_date))
 
     try:
-        db = get_mongo_client()['pharmacy_db']
+        db = get_mongo_client()[DB_NAME]
         try:
             tx = db['transactions'].find_one(
                 {'_id': ObjectId(request.form.get('loss_id', '')),
@@ -2119,7 +2127,7 @@ def remove_expired() -> ResponseReturnValue:
         return redirect('/reports')
     report_type = request.form.get('report_type', 'expired_list')
     try:
-        db = get_mongo_client()['pharmacy_db']
+        db = get_mongo_client()[DB_NAME]
         med_name = (request.form.get('med_name') or '').strip()
         try:
             quantity = int(request.form.get('quantity', ''))
@@ -2187,7 +2195,7 @@ def remove_expired_bulk() -> ResponseReturnValue:
     report_type = request.form.get('report_type', 'expired_list')
     reason = (request.form.get('bulk_reason') or '').strip()
     try:
-        db = get_mongo_client()['pharmacy_db']
+        db = get_mongo_client()[DB_NAME]
         selected = [n.strip() for n in request.form.getlist('sel') if n.strip()]
         if not selected:
             flash('Nothing was ticked, so nothing was removed.')
@@ -2261,7 +2269,7 @@ def correct_expiry() -> ResponseReturnValue:
         return redirect('/reports')
     report_type = request.form.get('report_type', 'expired_list')
     try:
-        db = get_mongo_client()['pharmacy_db']
+        db = get_mongo_client()[DB_NAME]
         med_name = (request.form.get('med_name') or '').strip()
         new_date = (request.form.get('expiry_date') or '').strip()
         try:
@@ -2294,7 +2302,7 @@ def reports() -> ResponseReturnValue:
     is_admin = session['user'].get('role') == 'admin'
     try:
         client = get_mongo_client()
-        db = client['pharmacy_db']
+        db = client[DB_NAME]
         medications = db['medications']
         transactions = db['transactions']
 
@@ -4041,7 +4049,7 @@ def temperature() -> ResponseReturnValue:
         return loc if loc in TEMP_LOCATIONS else TEMP_LOCATIONS[0]
 
     try:
-        db = get_mongo_client()['pharmacy_db']
+        db = get_mongo_client()[DB_NAME]
         logs = db['temperature_logs']
 
         if request.method == 'POST':
@@ -4524,7 +4532,7 @@ def dashboard() -> ResponseReturnValue:
                 'accuracy': ['-'] * len(months)}
 
     try:
-        db = get_mongo_client()['pharmacy_db']
+        db = get_mongo_client()[DB_NAME]
         movement = _monthly_movement(db['transactions'], window_start)
         all_meds = _by_name(db['medications'].find(_active(_category_filter(cat)), {'_id': 0}))
 
@@ -4859,7 +4867,7 @@ def write_audit_entry(action: str, target_type: str, target_id: Any, changes: An
     write must never be the reason a count fails to save.
     """
     try:
-        db = get_mongo_client()['pharmacy_db']
+        db = get_mongo_client()[DB_NAME]
         db['audit_log'].insert_one({
             'timestamp': datetime.utcnow(),
             'action': action,
@@ -4885,7 +4893,7 @@ def stock_take() -> ResponseReturnValue:
     message = flashed[0] if flashed else None
 
     try:
-        db = get_mongo_client()['pharmacy_db']
+        db = get_mongo_client()[DB_NAME]
         medications  = db['medications']
         transactions = db['transactions']
         stock_takes  = db['stock_takes']
@@ -5339,7 +5347,7 @@ def audit_log() -> ResponseReturnValue:
 
     try:
         client = get_mongo_client()
-        db = client['pharmacy_db']
+        db = client[DB_NAME]
 
         date_query: Query = {}
         if start_date:
@@ -5451,7 +5459,7 @@ def void_sale() -> ResponseReturnValue:
     if not reason:
         flash('Give a reason for voiding the sale.', 'error')
         return redirect(url_for('receipt', receipt_no=receipt_no))
-    db = get_mongo_client()['pharmacy_db']
+    db = get_mongo_client()[DB_NAME]
     sale = db['sales'].find_one_and_update(
         {'receipt_no': receipt_no, 'status': 'completed'},
         {'$set': {'status': 'voided', 'voided_by': session['user']['name'],
@@ -5474,7 +5482,7 @@ def void_sale() -> ResponseReturnValue:
 def edit_receive(receive_id: str) -> ResponseReturnValue:
     try:
         client = get_mongo_client()
-        db = client['pharmacy_db']
+        db = client[DB_NAME]
         transactions = db['transactions']
         medications  = db['medications']
 
@@ -5682,7 +5690,7 @@ def delete_receive() -> ResponseReturnValue:
 
     try:
         client = get_mongo_client()
-        db = client['pharmacy_db']
+        db = client[DB_NAME]
         transactions = db['transactions']
         medications  = db['medications']
 
@@ -5884,10 +5892,10 @@ def _backup_archive(db: Database, taken_by: str) -> tuple[str, bytes]:
         rows = '\n'.join(f'    {n.ljust(width)}  {counts[n]}'
                           for n in BACKUP_COLLECTIONS if n in counts)
         zf.writestr('README.txt', BACKUP_README.format(
-            when=when, who=taken_by, db='pharmacy_db', counts=rows))
+            when=when, who=taken_by, db=DB_NAME, counts=rows))
         zf.writestr('manifest.json', json.dumps({
             'taken_at': when, 'taken_by': taken_by,
-            'database': 'pharmacy_db', 'counts': counts,
+            'database': DB_NAME, 'counts': counts,
             'format': 'one JSON document per line (mongoimport)',
         }, indent=1))
     stamp = local_now().strftime('%Y%m%d-%H%M')
@@ -5902,7 +5910,7 @@ def backup_download() -> ResponseReturnValue:
         flash('Only an administrator can download the full backup.')
         return redirect(url_for('reports'))
     try:
-        db = get_mongo_client()['pharmacy_db']
+        db = get_mongo_client()[DB_NAME]
         taken_by = session['user']['name']
         filename, blob = _backup_archive(db, taken_by)
     except ServerSelectionTimeoutError:
@@ -6261,7 +6269,7 @@ def get_medication_defaults() -> ResponseReturnValue:
     unit, which is the inflation this app was already fixed for once.
     """
     try:
-        db = get_mongo_client()['pharmacy_db']
+        db = get_mongo_client()[DB_NAME]
         out = {}
         for m in db['medications'].find(
                 {}, {'_id': 0, 'name': 1, 'pack_size': 1, 'schedule': 1}):
@@ -6291,7 +6299,7 @@ def _medication_names() -> list[str]:
     hiding those names would quietly stop that being recorded.
     """
     try:
-        db = get_mongo_client()['pharmacy_db']
+        db = get_mongo_client()[DB_NAME]
         names = db['medications'].distinct('name')
         out = sorted((n.strip() for n in names if n and str(n).strip()),
                      key=lambda t: t.lower())
@@ -6316,7 +6324,7 @@ def api_stock() -> ResponseReturnValue:
     if not name:
         return jsonify({'found': False})
     try:
-        med = get_mongo_client()['pharmacy_db']['medications'].find_one(
+        med = get_mongo_client()[DB_NAME]['medications'].find_one(
             {'name': name}, {'_id': 0, 'balance': 1, 'expiry_date': 1})
     except Exception as e:
         app.logger.warning(f'stock lookup failed: {e}')
@@ -6360,7 +6368,7 @@ PUBLIC_FEED_MAX_AGE = 300
 @app.route('/api/public/products', methods=['GET'])
 def public_products() -> ResponseReturnValue:
     try:
-        meds = get_mongo_client()['pharmacy_db']['medications'].find(
+        meds = get_mongo_client()[DB_NAME]['medications'].find(
             _active({'on_website': True}),
             {'_id': 0, 'name': 1, 'web_category': 1, 'description': 1,
              'selling_price': 1, 'rx_only': 1, 'schedule': 1, 'balance': 1})
