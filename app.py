@@ -4671,30 +4671,30 @@ def dashboard() -> ResponseReturnValue:
         fill = (total_disp / (total_disp + total_unmet) * 100) if (total_disp + total_unmet) else None
         short_items = [r for r in rows if r['unmet']]
         tiles = [
-            {'label': 'Items tracked', 'value': len(rows), 'sub': '', 'bg': '#eef2f7', 'fg': '#1a3a5c'},
+            {'label': 'Items tracked', 'value': len(rows), 'sub': '', 'bg': '#E3EFE8', 'fg': '#134034'},
             {'label': 'Fill rate', 'value': f'{fill:.1f}%' if fill is not None else '-',
              'sub': f'{total_unmet:,} unit(s) asked for and not supplied',
              'bg': ('#f8d7da' if fill is not None and fill < 90
-                    else ('#fff3cd' if fill is not None and fill < 98 else '#eef2f7')),
+                    else ('#fff3cd' if fill is not None and fill < 98 else '#E3EFE8')),
              'fg': ('#721c24' if fill is not None and fill < 90
-                    else ('#856404' if fill is not None and fill < 98 else '#1a3a5c'))},
+                    else ('#856404' if fill is not None and fill < 98 else '#134034'))},
             {'label': 'Items that ran short', 'value': len(short_items),
              'sub': 'demand could not be met',
-             'bg': '#f8d7da' if short_items else '#eef2f7',
-             'fg': '#721c24' if short_items else '#1a3a5c'},
+             'bg': '#f8d7da' if short_items else '#E3EFE8',
+             'fg': '#721c24' if short_items else '#134034'},
             {'label': 'Out of stock', 'value': len(out_of_stock), 'sub': 'balance is zero',
-             'bg': '#f8d7da' if out_of_stock else '#eef2f7', 'fg': '#721c24' if out_of_stock else '#1a3a5c'},
+             'bg': '#f8d7da' if out_of_stock else '#E3EFE8', 'fg': '#721c24' if out_of_stock else '#134034'},
             {'label': 'Under 1 month of stock', 'value': len(under_one), 'sub': 'reorder now',
-             'bg': '#f8d7da' if under_one else '#eef2f7', 'fg': '#721c24' if under_one else '#1a3a5c'},
+             'bg': '#f8d7da' if under_one else '#E3EFE8', 'fg': '#721c24' if under_one else '#134034'},
             {'label': 'Expired on shelf', 'value': len(expired_now), 'sub': 'remove from stock',
-             'bg': '#f8d7da' if expired_now else '#eef2f7', 'fg': '#721c24' if expired_now else '#1a3a5c'},
+             'bg': '#f8d7da' if expired_now else '#E3EFE8', 'fg': '#721c24' if expired_now else '#134034'},
             {'label': 'Expiring in 90 days', 'value': len(expiring_90), 'sub': f'M{at_risk:,.2f} at risk',
-             'bg': '#fff3cd' if expiring_90 else '#eef2f7', 'fg': '#856404' if expiring_90 else '#1a3a5c'},
+             'bg': '#fff3cd' if expiring_90 else '#E3EFE8', 'fg': '#856404' if expiring_90 else '#134034'},
             {'label': 'Stock value', 'value': f'M{stock_value:,.0f}', 'sub': 'balance x unit price',
-             'bg': '#eef2f7', 'fg': '#1a3a5c'},
+             'bg': '#E3EFE8', 'fg': '#134034'},
             {'label': 'Cost per patient', 'value': cost_per_patient_label,
              'sub': f'{patient_total:,} patient(s) over the period',
-             'bg': '#eef2f7', 'fg': '#1a3a5c'},
+             'bg': '#E3EFE8', 'fg': '#134034'},
         ]
 
         # --- expiring panel ---------------------------------------------

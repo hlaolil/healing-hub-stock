@@ -24,20 +24,23 @@
         max-width: 1200px;
         margin: 0 auto;
         padding: 20px;
-        background-color: #f8f9fa;
-        color: #333;
+        background-color: #F3F8F5;
+        color: #17302A;
     }
+    a { color: #2A7D56; }
+    a:hover { color: #21664A; }
     h1 {
-        color: #0056b3;
+        font-family: Georgia, 'Times New Roman', serif;
+        color: #134034;
         text-align: center;
         margin-bottom: 20px;
     }
     h2 {
-        color: #343a40;
+        color: #134034;
         margin-top: 30px;
     }
     h3 {
-        color: #495057;
+        color: #4A635A;
         margin-top: 10px;
     }
     .nav-links {
@@ -46,21 +49,21 @@
         font-size: 16px;
         position: sticky;
         top: 0;
-        background-color: #f8f9fa;
+        background-color: #F3F8F5;
         z-index: 100;
         padding: 10px 0;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        border-bottom: 1px solid #dee2e6;
+        border-bottom: 1px solid #CFE3D8;
     }
     .nav-links a {
-        color: #0056b3;
+        color: #1E5B4A;
         text-decoration: none;
         margin: 0 10px;
         font-weight: bold;
     }
     .nav-links a:hover {
         text-decoration: underline;
-        color: #003d80;
+        color: #21664A;
     }
     form {
         background-color: #fff;
@@ -111,7 +114,7 @@
         gap: 10px;
         margin-bottom: 10px;
         padding: 10px;
-        border: 1px solid #ddd;
+        border: 1px solid #CFE3D8;
         border-radius: 4px;
         align-items: end;
     }
@@ -126,7 +129,7 @@
     .med-row input, .diag-row input {
         width: 100%;
         padding: 8px;
-        border: 1px solid #ced4da;
+        border: 1px solid #B9D6C6;
         border-radius: 4px;
         box-sizing: border-box;
     }
@@ -139,7 +142,7 @@
         width: 100%;
         padding: 8px;
         margin-bottom: 10px;
-        border: 1px solid #ced4da;
+        border: 1px solid #B9D6C6;
         border-radius: 4px;
         box-sizing: border-box;
     }
@@ -148,7 +151,7 @@
     }
     form input[type="submit"],
     form button {
-        background-color: #0056b3;
+        background-color: #2A7D56;
         color: #fff;
         border: none;
         padding: 12px 26px;
@@ -163,7 +166,7 @@
     }
     form input[type="submit"]:hover,
     form button:hover {
-        background-color: #003d80;
+        background-color: #21664A;
         transform: translateY(-2px);
         box-shadow: 0 5px 10px rgba(0,0,0,0.2);
     }
@@ -213,17 +216,17 @@
     }
     .action-buttons .edit-btn {
         background-color: #ffc107;
-        color: #212529;
+        color: #17302A;
     }
     .action-buttons .edit-btn:hover {
         background-color: #e0a800;
     }
     .action-buttons .view-btn {
-        background-color: #28a745;
+        background-color: #2A7D56;
         color: white;
     }
     .action-buttons .view-btn:hover {
-        background-color: #218838;
+        background-color: #21664A;
     }
     form button.delete-btn {
         /* FIX (UX): no longer zeroes out margin/padding — that was the
@@ -259,8 +262,8 @@
            rather than as the end of the table. They are painted on the
            scrolling content, so they appear only on the side with more. */
         background-image:
-            linear-gradient(to right, #f8f9fa 30%, rgba(248,249,250,0)),
-            linear-gradient(to left, #f8f9fa 30%, rgba(248,249,250,0)),
+            linear-gradient(to right, #F3F8F5 30%, rgba(243,248,245,0)),
+            linear-gradient(to left, #F3F8F5 30%, rgba(243,248,245,0)),
             linear-gradient(to right, rgba(0,0,0,.16), rgba(0,0,0,0)),
             linear-gradient(to left, rgba(0,0,0,.16), rgba(0,0,0,0));
         background-position: 0 0, 100% 0, 0 0, 100% 0;
@@ -279,26 +282,26 @@
     table th, table td {
         padding: 12px;
         text-align: left;
-        border: 1px solid #dee2e6;
+        border: 1px solid #CFE3D8;
     }
     table th {
-        background-color: #0056b3;
+        background-color: #2A7D56;
         color: #fff;
         font-weight: bold;
     }
     table tr:nth-child(even) {
-        background-color: #f8f9fa;
+        background-color: #F3F8F5;
     }
     table tr:hover {
-        background-color: #e0e7f5;
+        background-color: #E3EFE8;
     }
     .expired {
         background-color: #f8d7da !important;
         color: #721c24 !important;
     }
     .out-of-stock {
-        background-color: #e3f2fd !important;
-        color: #1976d2 !important;
+        background-color: #E3EFE8 !important;
+        color: #2A7D56 !important;
     }
     .close-to-expire {
         background-color: #fff3cd !important;
@@ -316,8 +319,8 @@
         font-weight: bold;
     }
     .message.success {
-        background-color: #d4edda;
-        color: #155724;
+        background-color: #E3F2EA;
+        color: #24533A;
     }
     .message.partial {
         background-color: #fff3cd;
@@ -374,12 +377,12 @@
     .filter-section input {
         width: 100%;
         padding: 8px;
-        border: 1px solid #ced4da;
+        border: 1px solid #B9D6C6;
         border-radius: 4px;
         box-sizing: border-box;
     }
     .filter-section a {
-        color: #0056b3;
+        color: #2A7D56;
         text-decoration: none;
         margin-left: 10px;
     }
@@ -418,12 +421,12 @@
         position: absolute; top: 1px; right: 1px; bottom: 1px; width: 70px;
         min-height: 0 !important; margin: 0; padding: 0;
         font-size: 14px; font-weight: bold; line-height: 1;
-        background: #f1f3f5; color: #0056b3;
-        border: 0; border-left: 1px solid #ced4da;
+        background: #E3EFE8; color: #2A7D56;
+        border: 0; border-left: 1px solid #B9D6C6;
         border-radius: 0 3px 3px 0; cursor: pointer; box-shadow: none;
     }
-    .pw-toggle:hover { background: #e2e6ea; color: #0056b3; }
-    .pw-toggle:focus-visible { outline: 2px solid #0056b3; outline-offset: -4px; }
+    .pw-toggle:hover { background: #E3EFE8; color: #2A7D56; }
+    .pw-toggle:focus-visible { outline: 2px solid #2A7D56; outline-offset: -4px; }
     /* ------------------------------------------------------------------
        Screens narrower than a laptop.
 
@@ -485,8 +488,8 @@
             text-align: left;
             padding: 4px 0;
             background-image:
-                linear-gradient(to right, #f8f9fa 30%, rgba(248,249,250,0)),
-                linear-gradient(to left, #f8f9fa 30%, rgba(248,249,250,0)),
+                linear-gradient(to right, #F3F8F5 30%, rgba(243,248,245,0)),
+                linear-gradient(to left, #F3F8F5 30%, rgba(243,248,245,0)),
                 linear-gradient(to right, rgba(0,0,0,.16), rgba(0,0,0,0)),
                 linear-gradient(to left, rgba(0,0,0,.16), rgba(0,0,0,0));
             background-position: 0 0, 100% 0, 0 0, 100% 0;
