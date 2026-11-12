@@ -1,0 +1,22 @@
+{#- The medication list is fetched once from /api/medications rather than
+    written into every page that needs it. The result is cached in module
+    scope, so the second picker on a page costs nothing.
+
+    Included by the pages that have a medication picker: receive and
+    add_medication. -#}
+
+<script>
+let _medicationOptions = null;
+
+async function getMedicationOptions() {
+    if (_medicationOptions) return _medicationOptions;
+    try {
+        const res = await fetch('/api/medications');
+        _medicationOptions = await res.json();
+    } catch(e) {
+        console.error('Failed to load medication list', e);
+        _medicationOptions = [];
+    }
+    return _medicationOptions;
+}
+</script>
