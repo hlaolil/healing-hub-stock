@@ -50,7 +50,7 @@ Environment variables:
 | `OWNER_EMAIL` | Where the daily summary and weekly alerts go (default: `GMAIL_USER`) |
 | `CRON_SECRET` | Long random string; Vercel Cron sends it so only Vercel can run the evening job |
 | `WEEKLY_ALERT_DAY` | Day for the weekly alerts: `Mon`…`Sun` (default `Thu`, so orders go in before the weekend) |
-| `MARKUP_PERCENT` | Markup used for suggested prices and below-cost warnings (default `80`, matching the business plan's gross margin) |
+| `MARKUP_PERCENT` | Markup used for suggested prices and below-cost warnings (default `82`, the 45% gross margin in the business plan) |
 | `SECRET_KEY` | Long random string; the app refuses to start without it |
 | `ADMIN_PASSWORD` | Needed to open the Register page and create accounts |
 | `WEBSITE_ORIGIN` | Optional: the website's address, e.g. `https://healinghubpharmacy.vercel.app`, to allow only it to read the feed (defaults to any site) |

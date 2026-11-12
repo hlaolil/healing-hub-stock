@@ -2113,12 +2113,12 @@ WEB_DESCRIPTION_MAX = 200
 
 
 # Pricing guard. The default markup matches the gross margin in the business
-# plan's financial model (cost of sales about 56% of sales, so price = cost x 1.8).
+# plan's financial model: a 45% margin means price = cost x 1.82.
 # Change it with the MARKUP_PERCENT setting.
 try:
-    MARKUP_PERCENT = float(os.getenv('MARKUP_PERCENT', '80'))
+    MARKUP_PERCENT = float(os.getenv('MARKUP_PERCENT', '82'))
 except ValueError:
-    MARKUP_PERCENT = 80.0
+    MARKUP_PERCENT = 82.0
 
 # Chronic medicines: how many units a patient takes a day decides how long a sale
 # lasts, and so when their refill reminder is due.
