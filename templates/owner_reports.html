@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Owner Reports &middot; The Healing Hub Pharmacy{% endblock %}
+{% block heading %}Owner Reports{% endblock %}
+{% block content %}
+{% if message %}<p class="message {{ message_class or 'success' }}">{{ message }}</p>{% endif %}
+
+<p>The daily summary is emailed every evening, and the weekly alerts every
+{{ weekly_day }}, to <strong>{{ owner_email or 'nobody yet (set GMAIL_USER and GMAIL_APP_PASSWORD)' }}</strong>.</p>
+<form method="POST" style="display:flex;gap:8px;flex-wrap:wrap;">
+    <button type="submit" name="send" value="daily">Email today's summary now</button>
+    <button type="submit" name="send" value="weekly">Email the weekly alerts now</button>
+    <button type="submit" name="send" value="retry">Retry refill reminders</button>
+</form>
+
+<h2>Refill adherence</h2>
+{% set a = weekly.adherence %}
+<p style="font-size:22px;margin:4px 0;"><strong>{{ pct(a.rate) }}</strong> of chronic refills collected on time</p>
+<p>Last {{ a.window_days }} days: {{ a.on_time }} on time, {{ a.late }} late, {{ a.missed }} missed,
+out of {{ a.due }} due, across {{ a.patients }} patient(s). On time means bought again within a week of
+the date the last supply ran out. Only sales where the patient agreed to reminders count.</p>
+
+<h2>Today so far</h2>
+<p>M{{ '%.2f'|format(daily.total) }} from {{ daily.count }} sale(s), gross profit
+M{{ '%.2f'|format(daily.profit) }}.
+{% if daily.missing_temps %}Temperature readings still missing: {{ daily.missing_temps|join(', ') }}.{% endif %}</p>
+
+<h2>Running low ({{ weekly.reorder|length }})</h2>
+<div class="table-scroll"><table>
+    <thead><tr><th>Item</th><th>In stock</th><th>Used per month</th><th>Weeks left</th><th>Last supplier</th></tr></thead>
+    <tbody>
+    {% for r in weekly.reorder %}
+        <tr><td>{{ r.name }}</td><td>{{ r.balance }}</td><td>{{ r.amc }}</td><td>{{ r.weeks }}</td><td>{{ r.supplier }}</td></tr>
+    {% else %}<tr><td colspan="5">Nothing is below a month's stock.</td></tr>{% endfor %}
+    </tbody>
+</table></div>
+
+<h2>Expiring within 90 days ({{ weekly.expiring|length }})</h2>
+<div class="table-scroll"><table>
+    <thead><tr><th>Item</th><th>Expires</th><th>Units</th><th>Value (M)</th></tr></thead>
+    <tbody>
+    {% for e in weekly.expiring %}
+        <tr><td>{{ e.name }}{% if e.expired %} <strong>(expired)</strong>{% endif %}</td><td>{{ e.expiry }}</td>
+            <td>{{ e.balance }}</td><td>{{ '%.2f'|format(e.value) }}</td></tr>
+    {% else %}<tr><td colspan="4">Nothing expires in the next 90 days.</td></tr>{% endfor %}
+    </tbody>
+</table></div>
+
+<h2>Priced below cost ({{ weekly.below_cost|length }})</h2>
+<p style="font-size:13px;">Suggested prices use a {{ markup_percent|round(0)|int }}% markup on cost
+(the MARKUP_PERCENT setting).</p>
+<div class="table-scroll"><table>
+    <thead><tr><th>Item</th><th>Selling (M)</th><th>Cost (M)</th><th>Suggested (M)</th></tr></thead>
+    <tbody>
+    {% for b in weekly.below_cost %}
+        <tr><td><a href="/edit-medication?med_name={{ b.name|urlencode }}">{{ b.name }}</a></td>
+            <td>{{ '%.2f'|format(b.selling_price) }}</td><td>{{ '%.2f'|format(b.cost) }}</td>
+            <td>{{ '%.2f'|format(b.suggested) }}</td></tr>
+    {% else %}<tr><td colspan="4">Every priced item sells above cost.</td></tr>{% endfor %}
+    </tbody>
+</table></div>
+
+<h2>Supplier prices</h2>
+<p style="font-size:13px;">The last price paid to each supplier, per unit, from Receiving. Items
+bought from more than one supplier come first, largest difference first.</p>
+<div class="table-scroll"><table>
+    <thead><tr><th>Item</th><th>Supplier</th><th>Unit cost (M)</th><th>Pack</th><th>Last bought</th></tr></thead>
+    <tbody>
+    {% for r in suppliers %}
+        {% for o in r.offers %}
+        <tr>
+            {% if loop.first %}<td rowspan="{{ r.offers|length }}">{{ r.name }}{% if r.saving %}<br><small>up to {{ r.saving }}% cheaper</small>{% endif %}</td>{% endif %}
+            <td>{{ o.supplier }}{% if loop.first and r.offers|length > 1 %} <strong>(cheapest)</strong>{% endif %}</td>
+            <td>{{ '%.2f'|format(o.unit) }}</td>
+            <td>{% if o.pack_price is not none %}M{{ '%.2f'|format(o.pack_price) }} / {{ o.pack_size }}{% endif %}</td>
+            <td>{{ o.when }}</td>
+        </tr>
+        {% endfor %}
+    {% else %}<tr><td colspan="5">No deliveries recorded yet.</td></tr>{% endfor %}
+    </tbody>
+</table></div>
+{% endblock %}

@@ -39,6 +39,7 @@
         {% endfor %}
         <tr class="total"><td>TOTAL (M)</td><td class="r">{{ '%.2f'|format(sale.total) }}</td></tr>
         <tr><td>Paid by</td><td class="r">{{ sale.payment_method }}</td></tr>
+        {% if sale.payment_ref %}<tr><td>Ref</td><td class="r">{{ sale.payment_ref }}</td></tr>{% endif %}
         {% if sale.amount_tendered is not none %}
         <tr><td>Tendered</td><td class="r">{{ '%.2f'|format(sale.amount_tendered) }}</td></tr>
         <tr><td>Change</td><td class="r">{{ '%.2f'|format(sale.change or 0) }}</td></tr>
@@ -47,13 +48,21 @@
         <tr><td>Medical aid</td><td class="r">{{ sale.medical_aid.scheme }} {{ sale.medical_aid.member_no }}</td></tr>
         {% endif %}
     </table>
+    {% if sale.late_entry %}<div class="c">Paper receipt {{ sale.late_entry.paper_receipt_no }}, entered later</div>{% endif %}
+    {% if sale.reminder and sale.reminder.status != 'failed' %}
+    <div class="c"><strong>Next refill due: {{ next_due }}</strong><br>We'll remind you before then.</div>
+    {% else %}
     <div class="c">Thank you. Ask us about free refill reminders.</div>
+    {% endif %}
 </div>
 <p>
     <button type="button" onclick="window.print()">Print receipt</button>
     <a href="{{ url_for('sell') }}"><button type="button">New sale</button></a>
     <a href="{{ url_for('sales') }}"><button type="button">All sales</button></a>
 </p>
+{% if sale.reminder %}
+<p style="font-size:13px;">Refill reminder: {{ {'sent': 'sent to the website', 'pending': 'waiting to reach the website (retried daily)', 'failed': 'refused by the website'}[sale.reminder.status] }}.</p>
+{% endif %}
 {% if sale.status == 'voided' %}
 <p class="message error">Voided by {{ sale.voided_by }}: {{ sale.void_reason }}</p>
 {% elif is_admin %}

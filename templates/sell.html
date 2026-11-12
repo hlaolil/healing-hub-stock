@@ -24,6 +24,10 @@
 <div class="pos-grid">
     <div>
         <h2>Basket</h2>
+        <label for="scan" style="font-weight:600;">Scan barcode</label>
+        <input id="scan" placeholder="Scan here, or type the item name below" autocomplete="off"
+               style="width:100%;box-sizing:border-box;margin-bottom:8px;">
+        <div id="scan-note" class="stock-note"></div>
         <datalist id="pos-products"></datalist>
         <div class="table-scroll"><table class="basket">
             <thead><tr><th>Item</th><th class="num" style="width:90px">Qty</th>
@@ -54,6 +58,12 @@
             <div class="stock-note">Change: <strong id="change">M0.00</strong></div>
         </div>
 
+        <div id="ref-box" class="hide">
+            <label for="payment_ref">Transaction code <span id="ref-req">*</span></label>
+            <input name="payment_ref" id="payment_ref" value="{{ form.get('payment_ref', '') }}"
+                   placeholder="From the confirmation SMS">
+        </div>
+
         <div id="aid-box" class="hide">
             <label for="aid_scheme">Medical aid scheme</label>
             <input name="aid_scheme" id="aid_scheme" value="{{ form.get('aid_scheme', '') }}">
@@ -70,6 +80,38 @@
             <label for="prescriber">Prescriber <span id="presc-req" class="hide">* (controlled item)</span></label>
             <input name="prescriber" id="prescriber" value="{{ form.get('prescriber', '') }}">
         </div>
+
+        <div id="rem-box" class="hide" style="margin-top:12px;border-top:1px solid #CFE3D8;padding-top:8px;">
+            <strong>Refill reminder</strong>
+            <div class="stock-note" id="rem-days"></div>
+            <label style="font-weight:normal;"><input type="checkbox" name="reminder_opt_in" id="reminder_opt_in"
+                {% if form.get('reminder_opt_in') %}checked{% endif %} style="width:auto;">
+                The patient agrees to refill reminders</label>
+            <div id="rem-fields" class="hide">
+                <label for="reminder_email">Email</label>
+                <input name="reminder_email" id="reminder_email" type="email" value="{{ form.get('reminder_email', '') }}">
+                <label for="reminder_phone">Phone (if no email)</label>
+                <input name="reminder_phone" id="reminder_phone" value="{{ form.get('reminder_phone', '') }}"
+                       placeholder="e.g. 58123456">
+                <div class="stock-note">Uses the customer name above. With no email, staff
+                phone the patient instead. Emails never name the medicine.</div>
+            </div>
+        </div>
+
+        <details style="margin-top:12px;" {% if form.get('paper_sale') %}open{% endif %}>
+            <summary>Entering a paper receipt? (till was down)</summary>
+            <label style="font-weight:normal;"><input type="checkbox" name="paper_sale" id="paper_sale"
+                {% if form.get('paper_sale') %}checked{% endif %} style="width:auto;">
+                This sale was written on paper</label>
+            <label for="paper_date">Date on the receipt</label>
+            <input type="date" name="paper_date" id="paper_date" value="{{ form.get('paper_date', '') }}">
+            <label for="paper_time">Time</label>
+            <input type="time" name="paper_time" id="paper_time" value="{{ form.get('paper_time', '') }}">
+            <label for="paper_receipt_no">Paper receipt number</label>
+            <input name="paper_receipt_no" id="paper_receipt_no" value="{{ form.get('paper_receipt_no', '') }}">
+            <div class="stock-note">The sale is dated when it happened and marked
+            "entered late" until an admin approves it on the Sales page.</div>
+        </details>
 
         <p style="margin-top:16px;"><input type="submit" value="Complete sale" id="complete"></p>
     </div>
@@ -103,7 +145,7 @@
     }
 
     function update() {
-        let total = 0, rx = false, controlled = false;
+        let total = 0, rx = false, controlled = false, chronicDays = [];
         for (const tr of rows.children) {
             const name = tr.querySelector('[name=med_names]').value.trim();
             const qty = parseInt(tr.querySelector('[name=quantities]').value, 10) || 0;
@@ -123,6 +165,7 @@
                     (!p.price ? ' &middot; <strong>no selling price set</strong>' : '');
                 if (p.rx_only || p.controlled) rx = true;
                 if (p.controlled) controlled = true;
+                if (p.chronic && qty) chronicDays.push(Math.floor(qty / (p.units_per_day || 1)));
             } else {
                 tr.querySelector('.unit').innerHTML = '&ndash;';
                 tr.querySelector('.line').innerHTML = '&ndash;';
@@ -133,6 +176,20 @@
         const pay = document.getElementById('payment_method').value;
         document.getElementById('cash-box').classList.toggle('hide', pay !== 'Cash');
         document.getElementById('aid-box').classList.toggle('hide', pay !== 'Medical aid');
+        const mobile = pay === 'M-Pesa' || pay === 'EcoCash';
+        document.getElementById('ref-box').classList.toggle('hide', !(mobile || pay === 'Card'));
+        document.getElementById('ref-req').classList.toggle('hide', !mobile);
+        document.getElementById('payment_ref').required = mobile;
+        const remBox = document.getElementById('rem-box');
+        remBox.classList.toggle('hide', !chronicDays.length);
+        if (chronicDays.length) {
+            const d = Math.min(...chronicDays);
+            document.getElementById('rem-days').textContent = d >= 7
+                ? 'This supply lasts about ' + d + ' days, so the next refill is due in ' + d + ' days.'
+                : 'This supply lasts less than 7 days, so no reminder will be set.';
+        }
+        const optIn = document.getElementById('reminder_opt_in').checked && chronicDays.length;
+        document.getElementById('rem-fields').classList.toggle('hide', !optIn);
         document.getElementById('rx-box').classList.toggle('hide', !rx);
         document.getElementById('cust-req').classList.toggle('hide', !rx);
         document.getElementById('presc-req').classList.toggle('hide', !controlled);
@@ -142,6 +199,34 @@
 
     document.getElementById('add-row').addEventListener('click', () => { addRow().querySelector('input').focus(); });
     document.getElementById('payment_method').addEventListener('change', update);
+    document.getElementById('reminder_opt_in').addEventListener('change', update);
+
+    // A USB scanner types the code and presses Enter. Add the item, or one more of it.
+    const scan = document.getElementById('scan');
+    scan.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();                       // never submit the sale from the scan box
+        const code = scan.value.trim();
+        scan.value = '';
+        if (!code) return;
+        const p = Object.values(products).find(x => x.barcode && x.barcode === code);
+        const note = document.getElementById('scan-note');
+        if (!p) { note.textContent = 'No item has barcode ' + code + '. Type the name instead.'; return; }
+        note.textContent = '';
+        for (const tr of rows.children) {
+            const input = tr.querySelector('[name=med_names]');
+            if (input.value.trim() === p.name) {
+                const q = tr.querySelector('[name=quantities]');
+                q.value = (parseInt(q.value, 10) || 0) + 1;
+                update(); return;
+            }
+        }
+        const empty = [...rows.children].find(tr => !tr.querySelector('[name=med_names]').value.trim());
+        const tr = empty || addRow();
+        tr.querySelector('[name=med_names]').value = p.name;
+        tr.querySelector('[name=quantities]').value = 1;
+        update();
+    });
     document.getElementById('amount_tendered').addEventListener('input', update);
     document.getElementById('pos-form').addEventListener('submit', () => {
         document.getElementById('complete').disabled = true;   // no double sale on a double click
@@ -153,6 +238,7 @@
         addRow();
     }
 
+    scan.focus();
     fetch('/api/pos/products').then(r => r.json()).then(list => {
         const dl = document.getElementById('pos-products');
         for (const p of list) {

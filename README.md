@@ -44,6 +44,13 @@ Environment variables:
 | --- | --- |
 | `MONGODB_URI` | MongoDB Atlas connection string |
 | `MONGODB_DB` | Database name, default `healing_hub`. The app refuses `pharmacy_db` (the NMC clinic's database), so the two apps can share one Atlas cluster without sharing data |
+| `WEBSITE_URL` | The public website, e.g. `https://healinghubpharmacy.vercel.app`. Chronic sales send refill reminders there |
+| `TILL_SYNC_SECRET` | Long random string, **the same** as on the website. Proves reminders come from the till |
+| `GMAIL_USER`, `GMAIL_APP_PASSWORD` | The pharmacy Gmail account and its 16-letter app password, for the owner emails |
+| `OWNER_EMAIL` | Where the daily summary and weekly alerts go (default: `GMAIL_USER`) |
+| `CRON_SECRET` | Long random string; Vercel Cron sends it so only Vercel can run the evening job |
+| `WEEKLY_ALERT_DAY` | Day for the weekly alerts: `Mon`…`Sun` (default `Thu`, so orders go in before the weekend) |
+| `MARKUP_PERCENT` | Markup used for suggested prices and below-cost warnings (default `80`, matching the business plan's gross margin) |
 | `SECRET_KEY` | Long random string; the app refuses to start without it |
 | `ADMIN_PASSWORD` | Needed to open the Register page and create accounts |
 | `WEBSITE_ORIGIN` | Optional: the website's address, e.g. `https://healinghubpharmacy.vercel.app`, to allow only it to read the feed (defaults to any site) |
@@ -70,3 +77,12 @@ python tests/run_all.py
 ```
 
 24 suites, 1,764 checks, run against an in-memory database. `tests/test_pos.py` covers the till, receipts, voids, cash-up and the public feed.
+
+## Retail features
+
+- **Point of sale** (`/sell`): scan a barcode (a USB scanner types the code and presses Enter) or type the item name. M-Pesa and EcoCash sales need the transaction code from the confirmation SMS.
+- **Chronic medicines**: tick *Chronic* on a product and enter how many units a patient takes a day. When the till sells it to a patient who agrees to reminders, it tells the website, which emails them 3 days before the supply runs out (or lists them for a phone call if they have no email). A repeat purchase moves the date on. The medicine name is never sent.
+- **Paper receipts**: when the internet or power is down, write paper receipts; enter them later under *Entering a paper receipt?* on the till. They are dated when they happened and wait on the Sales page for an admin to approve them against the paper copy.
+- **Pricing guard**: product forms suggest a selling price from the cost at `MARKUP_PERCENT`, and saving a price below cost shows a warning.
+- **Owner Reports** (`/owner-reports`, admin): refill adherence (refills collected on time), items running low, stock expiring within 90 days, items priced below cost, and the last price paid to each supplier.
+- **Owner emails**: every evening at 18:30 (Vercel Cron, `vercel.json`) the owner gets the day's sales by payment method, voids, write-offs, late paper entries, unmet demand and missing temperature readings. On `WEEKLY_ALERT_DAY` the weekly alerts come too. The same job retries refill reminders that could not reach the website.

@@ -529,6 +529,7 @@ def get_nav_links() -> str:
         audit_link = '<a href="/audit">Audit Log</a> | ' if is_admin else ''
         # NEW (Stock Take): admin-only physical count page.
         stock_take_link = '<a href="/stock-take">Stock Take</a> | ' if is_admin else ''
+        owner_link = '<a href="/owner-reports">Owner Reports</a> | ' if is_admin else ''
         return f"""
         <p class="nav-links"><strong>Navigate:</strong>
             <a href="/sell">Point of Sale</a> |
@@ -540,6 +541,7 @@ def get_nav_links() -> str:
             {add_med_link}
             <a href="/reports">Reports</a> |
             {stock_take_link}
+            {owner_link}
             {audit_link}
             <span>Welcome, {name}! <a href="/logout">Logout</a></span>
         </p>
@@ -882,6 +884,38 @@ def _money(v: Any) -> float:
     return round(float(v or 0) + 1e-9, 2)
 
 
+MOBILE_MONEY = ('M-Pesa', 'EcoCash')
+PAYMENT_REF_RE = re.compile(r'^[0-9A-Za-z.\-]{4,40}$')
+EMAIL_RE = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]{2,}$')
+# A paper receipt written while the till was down may be entered up to this many
+# days later (long weekends included); an admin then approves it on the Sales page.
+PAPER_SALE_MAX_DAYS = 14
+
+
+def _days_supply(qty: int, units_per_day: Any) -> int:
+    try:
+        per_day = float(units_per_day or 1)
+    except (TypeError, ValueError):
+        per_day = 1.0
+    return int(qty // per_day) if per_day > 0 else 0
+
+
+def _paper_sale_time(form: Any) -> tuple[datetime | None, str | None]:
+    """UTC time of a sale written on paper while the till was down, or an error."""
+    try:
+        local = datetime.strptime(f"{form.get('paper_date', '')} {form.get('paper_time') or '12:00'}",
+                                  '%Y-%m-%d %H:%M')
+    except ValueError:
+        return None, 'Enter the date and time written on the paper receipt.'
+    now_local = local_now()
+    if local > now_local:
+        return None, 'The paper receipt date cannot be in the future.'
+    if local < now_local - timedelta(days=PAPER_SALE_MAX_DAYS):
+        return None, (f'Paper receipts older than {PAPER_SALE_MAX_DAYS} days cannot be entered '
+                      'at the till; ask an admin to adjust stock instead.')
+    return local - timedelta(hours=PHARMACY_UTC_OFFSET_HOURS), None
+
+
 def _sale_lines_from_form(form: Any) -> tuple[list[tuple[str, int]], str | None]:
     """(name, quantity) pairs from the basket; same name twice is merged."""
     names = [n.strip() for n in form.getlist('med_names')]
@@ -915,17 +949,78 @@ def pos_products() -> ResponseReturnValue:
     try:
         meds = get_mongo_client()[DB_NAME]['medications'].find(
             _active(), {'_id': 0, 'name': 1, 'selling_price': 1, 'balance': 1,
-                        'rx_only': 1, 'schedule': 1})
+                        'rx_only': 1, 'schedule': 1, 'barcode': 1, 'chronic': 1,
+                        'units_per_day': 1})
         return jsonify([{
             'name': m['name'],
             'price': _money(m.get('selling_price')),
             'balance': _num(m.get('balance', 0) or 0),
             'rx_only': bool(m.get('rx_only')),
             'controlled': m.get('schedule') == 'controlled',
+            'barcode': m.get('barcode') or '',
+            'chronic': bool(m.get('chronic')),
+            'units_per_day': m.get('units_per_day') or 1,
         } for m in _by_name(meds)])
     except Exception as e:
         app.logger.warning(f'pos product list failed: {e}')
         return jsonify([])
+
+
+def _reminder_for_sale(wanted: bool, name: str, email: str, phone: str,
+                       lines: Docs, sold_on: str) -> Doc | None:
+    """The refill reminder to send to the website, or None.
+
+    One reminder per patient: when several chronic items are bought, the one that
+    runs out first decides the date. The medicine is not included.
+    """
+    if not wanted:
+        return None
+    days = [l['days_supply'] for l in lines if l.get('chronic') and l.get('days_supply')]
+    days = [d for d in days if d >= REMINDER_MIN_DAYS]
+    if not days:
+        return None
+    return {'name': name, 'email': email or None, 'phone': phone,
+            'days_supply': min(min(days), REMINDER_MAX_DAYS), 'sold_on': sold_on,
+            'status': 'pending', 'attempts': 0}
+
+
+def _push_reminder(db: Any, sale: Doc) -> str:
+    """Send a sale's refill reminder to the website. Returns a note for the cashier.
+
+    Needs WEBSITE_URL and TILL_SYNC_SECRET (the same secret as on the website). A
+    failure leaves the reminder 'pending'; the daily job tries again.
+    """
+    rem = sale.get('reminder') or {}
+    due = (datetime.strptime(rem['sold_on'], '%Y-%m-%d')
+           + timedelta(days=rem['days_supply'])).strftime('%d %b %Y')
+    url = (os.getenv('WEBSITE_URL') or '').rstrip('/')
+    secret = os.getenv('TILL_SYNC_SECRET') or ''
+    if not url or not secret:
+        status, note = 'pending', (f'Refill reminder for {due} saved, but the website link is not '
+                                   'set up yet (WEBSITE_URL and TILL_SYNC_SECRET).')
+    else:
+        try:
+            r = requests.post(f'{url}/api/reminders/from-till', timeout=8,
+                              headers={'Authorization': f'Bearer {secret}'},
+                              json={'name': rem['name'], 'email': rem.get('email'),
+                                    'phone': rem.get('phone') or '',
+                                    'days_supply': rem['days_supply'], 'sold_on': rem['sold_on']})
+            ok = r.status_code == 200
+        except requests.RequestException as e:
+            app.logger.warning(f'reminder push failed for {sale.get("receipt_no")}: {e}')
+            ok, r = False, None
+        if ok:
+            how = 'by email' if rem.get('email') else 'on the staff call list'
+            status, note = 'sent', f'Refill reminder set for {due} ({how}).'
+        elif r is not None and 400 <= r.status_code < 500 and r.status_code not in (401, 408, 429):
+            status, note = 'failed', f'The website refused the refill reminder ({r.status_code}).'
+        else:
+            status, note = 'pending', (f'Refill reminder for {due} could not reach the website; '
+                                       'it will be retried automatically.')
+    db['sales'].update_one({'_id': sale['_id']},
+                           {'$set': {'reminder.status': status, 'reminder.last_try': datetime.utcnow()},
+                            '$inc': {'reminder.attempts': 1}})
+    return note
 
 
 @app.route('/sell', methods=['GET', 'POST'])
@@ -962,6 +1057,32 @@ def sell() -> ResponseReturnValue:
         aid_member = (form.get('aid_member') or '').strip()[:40]
         if payment == 'Medical aid' and not (aid_scheme and aid_member):
             return refuse('Enter the medical aid scheme and member number.')
+        payment_ref = (form.get('payment_ref') or '').strip()
+        if payment in MOBILE_MONEY and not PAYMENT_REF_RE.match(payment_ref):
+            return refuse(f'Enter the {payment} transaction code from the confirmation SMS.')
+        if payment_ref and not PAYMENT_REF_RE.match(payment_ref):
+            return refuse('The payment reference may only contain letters, digits, dots and dashes.')
+
+        paper = form.get('paper_sale') == 'on'
+        paper_ts: datetime | None = None
+        paper_receipt = (form.get('paper_receipt_no') or '').strip()[:40]
+        if paper:
+            paper_ts, problem = _paper_sale_time(form)
+            if problem:
+                return refuse(problem)
+            if not paper_receipt:
+                return refuse('Enter the number written on the paper receipt.')
+
+        wants_reminder = form.get('reminder_opt_in') == 'on'
+        rem_email = (form.get('reminder_email') or '').strip().lower()[:120]
+        rem_phone = (form.get('reminder_phone') or '').strip()[:40]
+        if wants_reminder:
+            if not customer:
+                return refuse('Enter the patient\'s name for the refill reminder.')
+            if rem_email and not EMAIL_RE.match(rem_email):
+                return refuse('The reminder email address does not look right.')
+            if not rem_email and len(re.sub(r'\D', '', rem_phone)) < 8:
+                return refuse('For a refill reminder, enter the patient\'s email or phone number.')
 
         meds: dict[str, Doc] = {}
         missing, short, unpriced = [], [], []
@@ -1024,8 +1145,11 @@ def sell() -> ResponseReturnValue:
             change = _money(tendered - total)
 
         receipt_no = _next_receipt_no(db)
-        now = datetime.utcnow()
-        today = local_now().strftime('%Y-%m-%d')
+        entered_at = datetime.utcnow()
+        # A paper sale is dated when it happened, so the register, the cash-up
+        # and the stock movement all fall on the right day.
+        now = paper_ts or entered_at
+        today = (now + timedelta(hours=PHARMACY_UTC_OFFSET_HOURS)).strftime('%Y-%m-%d')
         taken: list[tuple[str, int]] = []
         sale_lines: Docs = []
         for name, qty in lines:
@@ -1057,7 +1181,10 @@ def sell() -> ResponseReturnValue:
             })
             sale_lines.append({'name': name, 'quantity': qty, 'unit_price': sell_price,
                                'line_total': line_total, 'cost': _money(qty * cost),
-                               'rx_only': bool(med.get('rx_only'))})
+                               'rx_only': bool(med.get('rx_only')),
+                               'chronic': bool(med.get('chronic')),
+                               'days_supply': (_days_supply(qty, med.get('units_per_day'))
+                                               if med.get('chronic') else None)})
 
         db['sales'].insert_one({
             'receipt_no': receipt_no, 'transaction_id': sale_id, 'status': 'completed',
@@ -1068,12 +1195,26 @@ def sell() -> ResponseReturnValue:
                             if payment == 'Medical aid' else None),
             'customer': customer, 'prescription_no': rx_no, 'prescriber': prescriber,
             'cashier': current_user, 'timestamp': now,
+            'payment_ref': payment_ref or None,
+            'late_entry': ({'paper_receipt_no': paper_receipt, 'entered_at': entered_at,
+                            'entered_by': current_user, 'approved': False}
+                           if paper else None),
+            'reminder': _reminder_for_sale(wants_reminder, customer, rem_email, rem_phone,
+                                           sale_lines, today),
         })
         write_audit_entry('CREATE', 'sale', receipt_no,
                           f'{len(sale_lines)} item(s), M{total:.2f} by {payment}, '
-                          f'cashier {current_user}')
+                          f'cashier {current_user}'
+                          + (f'; paper receipt {paper_receipt} entered late' if paper else ''))
+        note = ''
+        sale_doc = db['sales'].find_one({'receipt_no': receipt_no})
+        if sale_doc and sale_doc.get('reminder'):
+            note = ' ' + _push_reminder(db, sale_doc)
+        elif wants_reminder:
+            note = (' No refill reminder: nothing in this sale is marked chronic, or it lasts '
+                    f'less than {REMINDER_MIN_DAYS} days.')
         flash(f'Sale {receipt_no} recorded: M{total:.2f}'
-              + (f', change M{change:.2f}' if change else '') + '.', 'success')
+              + (f', change M{change:.2f}' if change else '') + '.' + note, 'success')
         return redirect(url_for('receipt', receipt_no=receipt_no))
     except ServerSelectionTimeoutError:
         return render_template('sell.html', nav_links=get_nav_links(),
@@ -1159,7 +1300,10 @@ def receipt(receipt_no: str) -> ResponseReturnValue:
         flash(f'No sale with receipt number {receipt_no}.', 'error')
         return redirect(url_for('sales'))
     message_class, message = _flashed_banner()
-    return render_template('receipt.html', nav_links=get_nav_links(), sale=sale,
+    rem = sale.get('reminder') or {}
+    next_due = ((datetime.strptime(rem['sold_on'], '%Y-%m-%d') + timedelta(days=rem['days_supply']))
+                .strftime('%d %b %Y') if rem.get('sold_on') else '')
+    return render_template('receipt.html', nav_links=get_nav_links(), sale=sale, next_due=next_due,
                            when=to_local(sale.get('timestamp'), '%d %b %Y %H:%M'),
                            message=message, message_class=message_class,
                            is_admin=session['user'].get('role') == 'admin')
@@ -1213,14 +1357,16 @@ def sales() -> ResponseReturnValue:
         out = io.StringIO()
         w = csv.writer(out)
         w.writerow(['Receipt', 'Date', 'Status', 'Customer', 'Item', 'Quantity',
-                     'Unit price', 'Line total', 'Payment', 'Cashier'])
+                     'Unit price', 'Line total', 'Payment', 'Payment code', 'Cashier',
+                     'Paper receipt (entered late)'])
         for s in db['sales'].find(q).sort('timestamp', 1):
             for l in s.get('lines', []):
                 w.writerow([_csv_value(v) for v in (
                     s.get('receipt_no'), to_local(s.get('timestamp')), s.get('status'),
                     s.get('customer'), l.get('name'), l.get('quantity'),
                     f"{l.get('unit_price', 0):.2f}", f"{l.get('line_total', 0):.2f}",
-                    s.get('payment_method'), s.get('cashier'))])
+                    s.get('payment_method'), s.get('payment_ref') or '', s.get('cashier'),
+                    (s.get('late_entry') or {}).get('paper_receipt_no', ''))])
         resp = make_response(out.getvalue())
         resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
         resp.headers['Content-Disposition'] = (
@@ -1233,13 +1379,41 @@ def sales() -> ResponseReturnValue:
                 .skip((pager['page'] - 1) * SALES_PAGE_SIZE).limit(SALES_PAGE_SIZE))
     for r in rows:
         r['when'] = to_local(r.get('timestamp'), '%d %b %H:%M')
+    # Paper receipts entered late, still waiting for an admin to check them:
+    # shown whatever dates are chosen, so none is forgotten.
+    awaiting = list(db['sales'].find({'late_entry.approved': False, 'status': {'$ne': 'voided'}})
+                    .sort('timestamp', 1).limit(100))
+    for r in awaiting:
+        r['when'] = to_local(r.get('timestamp'), '%d %b %H:%M')
+        r['entered'] = to_local(r['late_entry'].get('entered_at'), '%d %b %H:%M')
     message_class, message = _flashed_banner()
-    return render_template('sales.html', nav_links=get_nav_links(), rows=rows,
+    return render_template('sales.html', nav_links=get_nav_links(), rows=rows, awaiting=awaiting,
                            by_method=[(m, v) for m, v in by_method.items() if v['count']],
                            grand=grand, start_date=start_date, end_date=end_date,
                            search=search, pager=pager, window_defaulted=False, unit='sales',
                            is_admin=session['user'].get('role') == 'admin',
                            message=message, message_class=message_class)
+
+
+@app.route('/sales/approve', methods=['POST'])
+@login_required
+def approve_late_sale() -> ResponseReturnValue:
+    """Admin confirms a paper receipt entered late matches the paper copy."""
+    if session['user'].get('role') != 'admin':
+        flash('Only an admin can approve late entries.', 'error')
+        return redirect(url_for('sales'))
+    receipt_no = (request.form.get('receipt_no') or '').strip()
+    who = session['user']['name']
+    res = get_mongo_client()[DB_NAME]['sales'].update_one(
+        {'receipt_no': receipt_no, 'late_entry.approved': False},
+        {'$set': {'late_entry.approved': True, 'late_entry.approved_by': who,
+                  'late_entry.approved_at': datetime.utcnow()}})
+    if res.modified_count:
+        write_audit_entry('UPDATE', 'sale', receipt_no, f'late paper entry approved by {who}')
+        flash(f'{receipt_no} approved.', 'success')
+    else:
+        flash(f'{receipt_no} is not waiting for approval.', 'error')
+    return redirect(request.referrer or url_for('sales'))
 
 
 def _load_delivery(deliveries: Collection, raw_id: str | None) -> Doc | None:
@@ -1656,6 +1830,9 @@ def add_medication() -> ResponseReturnValue:
                 if initial_balance < 0:
                     raise ValueError('opening balance cannot be negative')
                 retail = _retail_fields(request.form)
+                clash = _barcode_taken(medications, retail['barcode'], med_name)
+                if clash:
+                    raise ValueError(f'barcode {retail["barcode"]} is already used by {clash}')
 
                 if medications.find_one({'name': med_name}):
                     message = f'Medication "{med_name}" already exists. Use Receiving to add stock.'
@@ -1697,6 +1874,7 @@ def add_medication() -> ResponseReturnValue:
                                f'{initial_balance} units (unit price M{price:.4f}).')
                 else:
                     message = 'Medication added successfully! Receive stock against a delivery.'
+                message += _price_warning(retail, price)
                 return render_template('add_medication.html', nav_links=get_nav_links(), message=message,
                      current_user=session.get('user', {}).get('name', ''),
                                                   categories=CATEGORIES, web_categories=WEB_CATEGORIES)
@@ -1785,6 +1963,9 @@ def edit_medication() -> ResponseReturnValue:
                 expiry_date = request.form['expiry_date']
                 schedule    = request.form['schedule']
                 retail      = _retail_fields(request.form)
+                clash = _barcode_taken(medications, retail['barcode'], med_name)
+                if clash:
+                    raise ValueError(f'barcode {retail["barcode"]} is already used by {clash}')
                 medications.update_one(
                     {'name': med_name},
                     # balance deliberately absent — see the note in the template
@@ -1793,7 +1974,7 @@ def edit_medication() -> ResponseReturnValue:
                               'expiry_date': expiry_date, 'schedule': schedule,
                               **retail}}
                 )
-                message = 'Medication updated successfully!'
+                message = 'Medication updated successfully!' + _price_warning(retail, price)
                 med_data = medications.find_one({'name': med_name})
                 return render_template('edit_medication.html', nav_links=get_nav_links(),
                                           categories=CATEGORIES, web_categories=WEB_CATEGORIES,
@@ -1931,8 +2112,26 @@ WEB_CATEGORIES = ['Prescription medicines', 'Over-the-counter medicines',
 WEB_DESCRIPTION_MAX = 200
 
 
+# Pricing guard. The default markup matches the gross margin in the business
+# plan's financial model (cost of sales about 56% of sales, so price = cost x 1.8).
+# Change it with the MARKUP_PERCENT setting.
+try:
+    MARKUP_PERCENT = float(os.getenv('MARKUP_PERCENT', '80'))
+except ValueError:
+    MARKUP_PERCENT = 80.0
+
+# Chronic medicines: how many units a patient takes a day decides how long a sale
+# lasts, and so when their refill reminder is due.
+REMINDER_MIN_DAYS, REMINDER_MAX_DAYS = 7, 180
+BARCODE_RE = re.compile(r'^[0-9A-Za-z\-]{4,40}$')
+
+
+def suggested_price(unit_cost: float) -> float:
+    return _money(unit_cost * (1 + MARKUP_PERCENT / 100.0)) if unit_cost else 0.0
+
+
 def _retail_fields(form: Any) -> Doc:
-    """Selling price and website fields from an add/edit product form."""
+    """Selling price, website, chronic and barcode fields from an add/edit product form."""
     raw = (form.get('selling_price') or '').strip()
     selling_price = float(raw) if raw else 0.0
     if selling_price < 0:
@@ -1941,13 +2140,44 @@ def _retail_fields(form: Any) -> Doc:
     web_category = form.get('web_category') or ''
     if web_category not in WEB_CATEGORIES:
         web_category = WEB_CATEGORIES[0] if rx_only else WEB_CATEGORIES[1]
+    chronic = form.get('chronic') == 'on'
+    raw_per_day = (form.get('units_per_day') or '').strip()
+    units_per_day = float(raw_per_day) if raw_per_day else 1.0
+    if chronic and not 0 < units_per_day <= 100:
+        raise ValueError('units taken per day must be more than 0')
+    barcode = (form.get('barcode') or '').strip()
+    if barcode and not BARCODE_RE.match(barcode):
+        raise ValueError('barcode may only contain letters, digits and dashes (4-40)')
     return {
         'selling_price': round(selling_price, 2),
         'rx_only': rx_only,
         'on_website': form.get('on_website') == 'on',
         'web_category': web_category,
         'description': (form.get('description') or '').strip()[:WEB_DESCRIPTION_MAX],
+        'chronic': chronic,
+        'units_per_day': round(units_per_day, 2) if chronic else None,
+        'barcode': barcode or None,
     }
+
+
+app.jinja_env.globals['markup_percent'] = MARKUP_PERCENT
+
+
+def _barcode_taken(medications: Any, barcode: str | None, own_name: str) -> str | None:
+    """Name of another product already using this barcode, if any."""
+    if not barcode:
+        return None
+    other = medications.find_one({'barcode': barcode, 'name': {'$ne': own_name}}, {'name': 1})
+    return other['name'] if other else None
+
+
+def _price_warning(retail: Doc, unit_cost: float) -> str:
+    """Warning text when the selling price is below cost (saved anyway)."""
+    sp = retail.get('selling_price') or 0
+    if sp and unit_cost and sp + 1e-9 < unit_cost:
+        return (f' Warning: the selling price M{sp:.2f} is below the cost of M{unit_cost:.2f} '
+                f'per unit; at {MARKUP_PERCENT:g}% markup it would be M{suggested_price(unit_cost):.2f}.')
+    return ''
 
 
 def _category_filter(choice: str | None) -> Query:
@@ -6394,6 +6624,344 @@ def public_products() -> ResponseReturnValue:
         resp.status_code = 503
     resp.headers['Access-Control-Allow-Origin'] = os.environ.get('WEBSITE_ORIGIN', '*')
     return resp
+
+
+# ---------------------------------------------------------------------------
+# Owner reports: a daily summary email, weekly reorder / expiry / pricing
+# alerts, refill adherence and supplier prices. Emails go through the
+# pharmacy's Gmail account (GMAIL_USER + GMAIL_APP_PASSWORD) to OWNER_EMAIL.
+# Vercel Cron calls /api/cron/daily every evening (see vercel.json); the
+# weekly alerts go out on WEEKLY_ALERT_DAY (default Thursday, so orders can
+# be placed before the weekend).
+# ---------------------------------------------------------------------------
+import smtplib
+from email.message import EmailMessage
+from html import escape as _h
+
+REFILL_GRACE_DAYS = 7          # collected within a week of the due date = on time
+EXPIRY_WARN_DAYS = 90
+WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+
+def _gmail() -> tuple[str, str] | None:
+    user = (os.getenv('GMAIL_USER') or '').strip()
+    pw = re.sub(r'\s+', '', os.getenv('GMAIL_APP_PASSWORD') or '')
+    return (user, pw) if user and pw else None
+
+
+def owner_email_address() -> str | None:
+    g = _gmail()
+    return (os.getenv('OWNER_EMAIL') or '').strip() or (g[0] if g else None)
+
+
+def send_owner_email(subject: str, text: str, html: str) -> bool:
+    g, to = _gmail(), owner_email_address()
+    if not g or not to:
+        app.logger.warning('owner email not sent: GMAIL_USER / GMAIL_APP_PASSWORD not set')
+        return False
+    msg = EmailMessage()
+    msg['Subject'], msg['From'], msg['To'] = subject, f'The Healing Hub Pharmacy <{g[0]}>', to
+    msg.set_content(text)
+    msg.add_alternative(html, subtype='html')
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=20) as smtp:
+            smtp.login(*g)
+            smtp.send_message(msg)
+        return True
+    except (smtplib.SMTPException, OSError) as e:
+        app.logger.warning(f'owner email failed: {e}')
+        return False
+
+
+def _day_window(day: date) -> tuple[datetime, datetime]:
+    start = datetime(day.year, day.month, day.day) - timedelta(hours=PHARMACY_UTC_OFFSET_HOURS)
+    return start, start + timedelta(days=1)
+
+
+def _patient_key(rem: Doc) -> str | None:
+    if rem.get('email'):
+        return 'e:' + rem['email'].lower()
+    digits = re.sub(r'\D', '', rem.get('phone') or '')
+    return 'p:' + digits[-8:] if len(digits) >= 8 else None
+
+
+def refill_adherence(db: Any, today: date, window_days: int = 180) -> Doc:
+    """How many chronic refills were collected on time.
+
+    Each chronic purchase with a reminder makes the next refill due on
+    sale date + days supply. The refill is on time if the patient buys again
+    within REFILL_GRACE_DAYS of that date, late if later, and missed if the
+    grace period has passed with no purchase.
+    """
+    since = (today - timedelta(days=window_days)).strftime('%Y-%m-%d')
+    by_patient: dict[str, list[Doc]] = defaultdict(list)
+    for s in db['sales'].find({'reminder.sold_on': {'$gte': since}, 'status': {'$ne': 'voided'}},
+                              {'reminder': 1}):
+        key = _patient_key(s['reminder'])
+        if key:
+            by_patient[key].append(s['reminder'])
+    on_time = late = missed = 0
+    for visits in by_patient.values():
+        visits.sort(key=lambda r: r['sold_on'])
+        for prev, nxt in zip(visits, visits[1:] + [None]):
+            due = datetime.strptime(prev['sold_on'], '%Y-%m-%d').date() + timedelta(days=prev['days_supply'])
+            deadline = due + timedelta(days=REFILL_GRACE_DAYS)
+            if nxt is None:
+                if deadline < today:
+                    missed += 1
+                continue
+            bought = datetime.strptime(nxt['sold_on'], '%Y-%m-%d').date()
+            if bought <= deadline:
+                on_time += 1
+            else:
+                late += 1
+    due_total = on_time + late + missed
+    return {'patients': len(by_patient), 'on_time': on_time, 'late': late, 'missed': missed,
+            'due': due_total, 'rate': (on_time / due_total) if due_total else None,
+            'window_days': window_days}
+
+
+def daily_summary(db: Any, day: date) -> Doc:
+    start, end = _day_window(day)
+    sales_q = {'timestamp': {'$gte': start, '$lt': end}}
+    by_method: dict[str, Doc] = {}
+    count, total, cost = 0, 0.0, 0.0
+    reminders_set = 0
+    for s in db['sales'].find(sales_q):
+        if s.get('status') == 'voided':
+            continue
+        m = by_method.setdefault(s.get('payment_method') or 'Other', {'count': 0, 'total': 0.0})
+        m['count'] += 1
+        m['total'] += s.get('total') or 0
+        count += 1
+        total += s.get('total') or 0
+        cost += s.get('cost_total') or 0
+        if s.get('reminder') and s['reminder'].get('status') != 'failed':
+            reminders_set += 1
+    voids = [{'receipt_no': s['receipt_no'], 'total': s.get('total') or 0,
+              'by': s.get('voided_by'), 'reason': s.get('void_reason')}
+             for s in db['sales'].find({'voided_at': {'$gte': start, '$lt': end}})]
+    writeoffs = [{'name': t['med_name'], 'qty': -(t.get('quantity') or 0), 'reason': t.get('reason'),
+                  'value': -(t.get('line_value') or 0), 'by': t.get('user')}
+                 for t in db['transactions'].find({'type': 'damage', 'timestamp': {'$gte': start, '$lt': end}})]
+    late_today = db['sales'].count_documents({'late_entry.entered_at': {'$gte': start, '$lt': end}})
+    awaiting = db['sales'].count_documents({'late_entry.approved': False, 'status': {'$ne': 'voided'}})
+    unmet = [{'name': t['med_name'], 'shortfall': t.get('shortfall') or 0}
+             for t in db['transactions'].find({'type': 'unmet_demand', 'timestamp': {'$gte': start, '$lt': end}})]
+    logged = {(t.get('location'), t.get('session'))
+              for t in db['temperature_logs'].find({'date': datetime(day.year, day.month, day.day)},
+                                                    {'location': 1, 'session': 1})}
+    # Only places the pharmacy actually records (any reading in the last 30 days):
+    # a store room it doesn't have should not be reported missing every evening.
+    in_use = set(db['temperature_logs'].distinct(
+        'location', {'date': {'$gte': datetime(day.year, day.month, day.day) - timedelta(days=30)}}))
+    missing_temps = [f'{loc} ({sess})' for loc in TEMP_LOCATIONS if loc in in_use
+                     for sess in TEMP_SESSIONS if (loc, sess) not in logged]
+    pending_reminders = db['sales'].count_documents({'reminder.status': 'pending'})
+    return {'day': day, 'count': count, 'total': total, 'cost': cost, 'profit': total - cost,
+            'by_method': sorted(by_method.items(), key=lambda kv: -kv[1]['total']),
+            'voids': voids, 'writeoffs': writeoffs, 'late_today': late_today, 'awaiting': awaiting,
+            'unmet': unmet, 'missing_temps': missing_temps, 'reminders_set': reminders_set,
+            'pending_reminders': pending_reminders}
+
+
+def weekly_alerts(db: Any, today: date) -> Doc:
+    medications, transactions = db['medications'], db['transactions']
+    now = datetime.utcnow()
+    window = {'$gte': now - timedelta(days=90), '$lte': now}
+    meds = _by_name(medications.find(_active(), {'_id': 0}))
+    movement = _movement_by_med(transactions, window)
+    demand = _demand_by_med(transactions, window)
+    reorder, expiring, below_cost = [], [], []
+    for m in meds:
+        name = m.get('name', '')
+        bal = m.get('balance', 0) or 0
+        mv = movement.get(name, _ZERO_MOVEMENT)
+        amc = (mv['dispensed'] + mv['issued'] + demand.get(name, _ZERO_DEMAND)['shortfall']) / 3.0
+        if amc > 0 and bal / amc < 1:
+            reorder.append({'name': name, 'balance': _num(bal), 'amc': round(amc, 1),
+                            'weeks': round(bal / amc * 4.3, 1), 'supplier': m.get('supplier') or ''})
+        exp = (m.get('expiry_date') or '').split('T')[0]
+        if bal > 0 and exp:
+            try:
+                exp_d = datetime.strptime(exp, '%Y-%m-%d').date()
+            except ValueError:
+                exp_d = None
+            if exp_d and exp_d <= today + timedelta(days=EXPIRY_WARN_DAYS):
+                expiring.append({'name': name, 'expiry': exp, 'balance': _num(bal),
+                                 'value': _money(bal * (m.get('price') or 0)),
+                                 'expired': exp_d < today})
+        sp, cost = m.get('selling_price') or 0, m.get('price') or 0
+        if sp and cost and sp + 1e-9 < cost:
+            below_cost.append({'name': name, 'selling_price': sp, 'cost': round(cost, 2),
+                               'suggested': suggested_price(cost)})
+    reorder.sort(key=lambda r: r['weeks'])
+    expiring.sort(key=lambda r: r['expiry'])
+    unmet = defaultdict(int)
+    for t in transactions.find({'type': 'unmet_demand', 'timestamp': {'$gte': now - timedelta(days=7)}}):
+        unmet[t['med_name']] += t.get('shortfall') or 0
+    return {'reorder': reorder, 'expiring': expiring, 'below_cost': below_cost,
+            'unmet': sorted(unmet.items(), key=lambda kv: -kv[1]),
+            'adherence': refill_adherence(db, today),
+            'failed_reminders': db['sales'].count_documents({'reminder.status': {'$in': ['pending', 'failed']}})}
+
+
+def supplier_prices(db: Any) -> list[Doc]:
+    """Last unit price paid to each supplier, per product, cheapest first."""
+    latest: dict[tuple[str, str], Doc] = {}
+    for t in db['transactions'].find({'type': 'receive', 'supplier': {'$nin': [None, '']}},
+                                     {'med_name': 1, 'supplier': 1, 'price': 1, 'pack_price': 1,
+                                      'pack_size': 1, 'timestamp': 1}).sort('timestamp', 1):
+        latest[(t['med_name'], t['supplier'])] = t
+    by_med: dict[str, list[Doc]] = defaultdict(list)
+    for (name, supplier), t in latest.items():
+        by_med[name].append({'supplier': supplier, 'unit': t.get('price') or 0,
+                             'pack_price': t.get('pack_price'), 'pack_size': t.get('pack_size'),
+                             'when': to_local(t.get('timestamp'), '%d %b %Y')})
+    rows = []
+    for name in sorted(by_med):
+        offers = sorted(by_med[name], key=lambda o: o['unit'])
+        cheapest = offers[0]['unit']
+        rows.append({'name': name, 'offers': offers,
+                     'saving': (round((offers[-1]['unit'] - cheapest) / offers[-1]['unit'] * 100)
+                                if len(offers) > 1 and offers[-1]['unit'] else 0)})
+    rows.sort(key=lambda r: (-r['saving'], r['name']))
+    return rows
+
+
+def _pct(x: float | None) -> str:
+    return '–' if x is None else f'{x * 100:.0f}%'
+
+
+def render_daily_email(d: Doc) -> tuple[str, str, str]:
+    day = d['day'].strftime('%a %d %b %Y')
+    subject = f"Healing Hub {d['day']:%d %b}: M{d['total']:,.2f} from {d['count']} sale(s)"
+    lines = [f'Daily summary for {day}', '',
+             f"Sales: {d['count']}, total M{d['total']:,.2f}, gross profit M{d['profit']:,.2f}"]
+    lines += [f"  {m}: {v['count']} sale(s), M{v['total']:,.2f}" for m, v in d['by_method']]
+    flags = []
+    if d['voids']:
+        flags.append(f"{len(d['voids'])} voided sale(s): " + '; '.join(
+            f"{v['receipt_no']} M{v['total']:.2f} by {v['by']} ({v['reason']})" for v in d['voids']))
+    if d['writeoffs']:
+        flags.append(f"{len(d['writeoffs'])} write-off(s): " + '; '.join(
+            f"{w['name']} x{_num(w['qty'])} {w['reason']} (M{w['value']:.2f}) by {w['by']}" for w in d['writeoffs']))
+    if d['late_today'] or d['awaiting']:
+        flags.append(f"Paper receipts entered today: {d['late_today']}; awaiting approval in total: {d['awaiting']}")
+    if d['unmet']:
+        flags.append('Asked for but out of stock: ' + '; '.join(f"{u['name']} ({_num(u['shortfall'])})" for u in d['unmet']))
+    if d['missing_temps']:
+        flags.append('Temperature readings missing: ' + ', '.join(d['missing_temps']))
+    if d['pending_reminders']:
+        flags.append(f"{d['pending_reminders']} refill reminder(s) have not reached the website yet")
+    lines += ['', f"Refill reminders set today: {d['reminders_set']}", '']
+    lines += (['Needs attention:'] + [f'- {f}' for f in flags]) if flags else ['Nothing needs attention.']
+    text = '\n'.join(lines)
+    rows = ''.join(f"<tr><td>{_h(m)}</td><td style='text-align:right'>{v['count']}</td>"
+                   f"<td style='text-align:right'>M{v['total']:,.2f}</td></tr>" for m, v in d['by_method'])
+    html = (f"<div style='font-family:Arial,sans-serif;color:#17302A;max-width:560px'>"
+            f"<h2 style='color:#134034'>Daily summary, {_h(day)}</h2>"
+            f"<p style='font-size:22px;margin:0'><strong>M{d['total']:,.2f}</strong> from {d['count']} sale(s)</p>"
+            f"<p>Gross profit M{d['profit']:,.2f} &middot; refill reminders set: {d['reminders_set']}</p>"
+            f"<table cellpadding='4' style='border-collapse:collapse'>{rows}</table>"
+            + (f"<h3 style='color:#7A4B00'>Needs attention</h3><ul>{''.join(f'<li>{_h(f)}</li>' for f in flags)}</ul>"
+               if flags else "<p>Nothing needs attention.</p>")
+            + "</div>")
+    return subject, text, html
+
+
+def render_weekly_email(w: Doc, today: date) -> tuple[str, str, str]:
+    a = w['adherence']
+    subject = (f"Healing Hub weekly: {len(w['reorder'])} to reorder, "
+               f"{len(w['expiring'])} expiring, {len(w['below_cost'])} below cost")
+    sections: list[tuple[str, list[str]]] = [
+        ('Running low (less than a month left)',
+         [f"{r['name']}: {r['balance']} left, about {r['weeks']} weeks"
+          + (f" (last supplier {r['supplier']})" if r['supplier'] else '') for r in w['reorder']]),
+        (f'Expiring within {EXPIRY_WARN_DAYS} days',
+         [f"{e['name']}: {e['balance']} units, expires {e['expiry']}"
+          + (' (ALREADY EXPIRED)' if e['expired'] else '') + f", value M{e['value']:.2f}" for e in w['expiring']]),
+        ('Priced below cost',
+         [f"{b['name']}: selling M{b['selling_price']:.2f}, cost M{b['cost']:.2f}, "
+          f"suggested M{b['suggested']:.2f}" for b in w['below_cost']]),
+        ('Asked for but out of stock this week', [f'{n}: {_num(q)} units' for n, q in w['unmet']]),
+    ]
+    adherence = (f"Refills collected on time (last {a['window_days']} days): {a['on_time']} of {a['due']} "
+                 f"({_pct(a['rate'])}); late {a['late']}, missed {a['missed']}; {a['patients']} chronic patient(s).")
+    text = '\n'.join([f'Weekly alerts, {today:%d %b %Y}', '', adherence, '']
+                     + sum([[t] + ([f'- {x}' for x in items] or ['- none']) + [''] for t, items in sections], []))
+    html = (f"<div style='font-family:Arial,sans-serif;color:#17302A;max-width:600px'>"
+            f"<h2 style='color:#134034'>Weekly alerts, {today:%d %b %Y}</h2><p>{_h(adherence)}</p>"
+            + ''.join(f"<h3 style='color:#134034'>{_h(t)}</h3>"
+                      + (f"<ul>{''.join(f'<li>{_h(x)}</li>' for x in items)}</ul>" if items else '<p>None.</p>')
+                      for t, items in sections)
+            + "</div>")
+    return subject, text, html
+
+
+def retry_pending_reminders(db: Any, limit: int = 50) -> int:
+    sent = 0
+    for s in db['sales'].find({'reminder.status': 'pending', 'reminder.attempts': {'$lt': 10}}).limit(limit):
+        _push_reminder(db, s)
+        if db['sales'].find_one({'_id': s['_id']}, {'reminder.status': 1})['reminder']['status'] == 'sent':
+            sent += 1
+    return sent
+
+
+def _cron_authorised() -> bool:
+    secret = os.getenv('CRON_SECRET') or ''
+    return bool(secret) and hmac.compare_digest(request.headers.get('Authorization', ''), f'Bearer {secret}')
+
+
+@app.route('/api/cron/daily', methods=['GET'])
+def cron_daily() -> ResponseReturnValue:
+    """Vercel Cron, every evening: retry reminders, email the day's summary,
+    and on WEEKLY_ALERT_DAY the weekly alerts too."""
+    if not _cron_authorised():
+        return jsonify({'error': 'unauthorised'}), 401
+    db = get_mongo_client()[DB_NAME]
+    today = local_now().date()
+    retried = retry_pending_reminders(db)
+    daily_sent = send_owner_email(*render_daily_email(daily_summary(db, today)))
+    weekly_sent = None
+    if WEEKDAYS[today.weekday()] == (os.getenv('WEEKLY_ALERT_DAY') or 'Thu')[:3].title():
+        weekly_sent = send_owner_email(*render_weekly_email(weekly_alerts(db, today), today))
+    return jsonify({'day': str(today), 'daily_email': daily_sent, 'weekly_email': weekly_sent,
+                    'reminders_retried': retried})
+
+
+@app.route('/owner-reports', methods=['GET', 'POST'])
+@login_required
+def owner_reports() -> ResponseReturnValue:
+    if session['user'].get('role') != 'admin':
+        flash('Owner reports are for admins.', 'error')
+        return redirect(url_for('sell'))
+    db = get_mongo_client()[DB_NAME]
+    today = local_now().date()
+    if request.method == 'POST':
+        which = request.form.get('send')
+        if which == 'daily':
+            ok = send_owner_email(*render_daily_email(daily_summary(db, today)))
+        elif which == 'weekly':
+            ok = send_owner_email(*render_weekly_email(weekly_alerts(db, today), today))
+        elif which == 'retry':
+            n = retry_pending_reminders(db)
+            flash(f'{n} pending refill reminder(s) reached the website.', 'success')
+            return redirect(url_for('owner_reports'))
+        else:
+            ok = False
+        to = owner_email_address()
+        flash(f'Email sent to {to}.' if ok else
+              'Email not sent: set GMAIL_USER and GMAIL_APP_PASSWORD (and OWNER_EMAIL if it should '
+              'go elsewhere), then check the app password.', 'success' if ok else 'error')
+        return redirect(url_for('owner_reports'))
+    message_class, message = _flashed_banner()
+    return render_template('owner_reports.html', nav_links=get_nav_links(),
+                           message=message, message_class=message_class,
+                           daily=daily_summary(db, today), weekly=weekly_alerts(db, today),
+                           suppliers=supplier_prices(db), owner_email=owner_email_address(),
+                           markup_percent=MARKUP_PERCENT, pct=_pct,
+                           weekly_day=(os.getenv('WEEKLY_ALERT_DAY') or 'Thu')[:3].title())
 
 
 # FIX (Bug, regression): init_audit() must run at module level, not inside

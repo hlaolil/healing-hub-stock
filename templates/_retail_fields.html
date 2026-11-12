@@ -7,8 +7,14 @@ prescription number at the till and never show a price on the website.</p>
 <div class="common-section">
     <div>
         <label>Customer price, each single unit (M):</label>
-        <input name="selling_price" type="number" step="0.01" min="0"
+        <input name="selling_price" id="selling_price" type="number" step="0.01" min="0"
                value="{{ '%.2f'|format(m.get('selling_price') or 0) if m else '' }}" required>
+        <div id="price-hint" style="font-size:12px;margin-top:4px;"></div>
+    </div>
+    <div>
+        <label>Barcode (optional, scan it here):</label>
+        <input name="barcode" maxlength="40" autocomplete="off"
+               value="{{ m.get('barcode') or '' if m else '' }}">
     </div>
     <div>
         <label>Website Category:</label>
@@ -26,8 +32,45 @@ prescription number at the till and never show a price on the website.</p>
         <label><input type="checkbox" name="on_website" {% if m and m.get('on_website') %}checked{% endif %}>
             Show on website</label>
     </div>
+    <div>
+        <label><input type="checkbox" name="chronic" id="chronic" {% if m and m.get('chronic') %}checked{% endif %}>
+            Chronic medicine (sets refill reminders at the till)</label>
+    </div>
+    <div id="per-day-row">
+        <label>Units the patient takes per day:</label>
+        <input name="units_per_day" type="number" step="0.5" min="0.5"
+               value="{{ m.get('units_per_day') or 1 if m else 1 }}">
+        <div style="font-size:12px;">A sale of 30 units at 1 a day lasts 30 days, so the
+        reminder is due 30 days after the sale.</div>
+    </div>
     <div style="grid-column: 1 / -1;">
         <label>Short description for the website (optional):</label>
         <input name="description" maxlength="200" value="{{ m.get('description', '') if m else '' }}">
     </div>
 </div>
+
+<script>
+(function () {
+  // Suggested price from the pack cost, and a warning when priced below cost.
+  var markup = {{ markup_percent }};
+  var hint = document.getElementById('price-hint');
+  var sell = document.getElementById('selling_price');
+  var packPrice = document.querySelector('input[name="pack_price"]');
+  var packSize = document.querySelector('input[name="pack_size"]');
+  function update() {
+    var pp = parseFloat(packPrice && packPrice.value), ps = parseFloat(packSize && packSize.value) || 1;
+    if (!pp) { hint.textContent = ''; return; }
+    var cost = pp / ps, suggested = cost * (1 + markup / 100), sp = parseFloat(sell.value);
+    hint.innerHTML = 'Cost M' + cost.toFixed(2) + ' per unit. At ' + markup + '% markup: <a href="#" id="use-suggested">M'
+      + suggested.toFixed(2) + '</a>' + (sp && sp < cost ? ' <strong style="color:#b00020;">Below cost!</strong>' : '');
+    document.getElementById('use-suggested').onclick = function (e) {
+      e.preventDefault(); sell.value = suggested.toFixed(2); update();
+    };
+  }
+  [sell, packPrice, packSize].forEach(function (el) { if (el) el.addEventListener('input', update); });
+  update();
+  var chronic = document.getElementById('chronic'), row = document.getElementById('per-day-row');
+  function toggle() { row.style.display = chronic.checked ? '' : 'none'; }
+  chronic.addEventListener('change', toggle); toggle();
+})();
+</script>

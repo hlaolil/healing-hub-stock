@@ -12,6 +12,29 @@
     <div><label>&nbsp;</label><input type="submit" value="Show"></div>
 </form>
 
+{% if awaiting %}
+<h2>Paper receipts entered late ({{ awaiting|length }})</h2>
+<p style="font-size:13px;">Check each against its paper copy. Stock and cash-up already
+include them, dated when they happened.</p>
+<div class="table-scroll"><table>
+    <thead><tr><th>Receipt</th><th>Sold</th><th>Paper no.</th><th>Total (M)</th><th>Entered by</th><th>Entered</th><th></th></tr></thead>
+    <tbody>
+    {% for r in awaiting %}
+        <tr>
+            <td><a href="{{ url_for('receipt', receipt_no=r.receipt_no) }}">{{ r.receipt_no }}</a></td>
+            <td>{{ r.when }}</td><td>{{ r.late_entry.paper_receipt_no }}</td>
+            <td>{{ '%.2f'|format(r.total) }}</td><td>{{ r.late_entry.entered_by }}</td><td>{{ r.entered }}</td>
+            <td>{% if is_admin %}
+                <form method="POST" action="{{ url_for('approve_late_sale') }}" style="margin:0;">
+                    <input type="hidden" name="receipt_no" value="{{ r.receipt_no }}">
+                    <input type="submit" value="Approve">
+                </form>{% else %}Awaiting admin{% endif %}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{% endif %}
+
 <h2>Cash-up {% if start_date == end_date and start_date %}for {{ start_date }}{% endif %}</h2>
 <div class="table-scroll"><table>
     <thead><tr><th>Payment</th><th>Sales</th><th>Total (M)</th></tr></thead>
@@ -44,7 +67,8 @@
             <td>{{ r.when }}</td>
             <td>{% for l in r.lines %}{{ l.name }} &times;{{ l.quantity }}{% if not loop.last %}; {% endif %}{% endfor %}</td>
             <td>{{ '%.2f'|format(r.total) }}</td>
-            <td>{{ r.payment_method }}</td>
+            <td>{{ r.payment_method }}{% if r.payment_ref %}<br><small>{{ r.payment_ref }}</small>{% endif %}
+                {% if r.late_entry %}<br><small>Paper {{ r.late_entry.paper_receipt_no }}{% if not r.late_entry.approved %} (awaiting approval){% endif %}</small>{% endif %}</td>
             <td>{{ r.customer }}</td>
             <td>{{ r.cashier }}</td>
         </tr>

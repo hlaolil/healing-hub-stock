@@ -4,7 +4,8 @@ import os
 os.environ['SECRET_KEY'] = 'k'
 os.environ['MONGO_URI'] = 'mongodb://localhost:27017'
 import mongomock, pymongo, re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import json
 
 _f = mongomock.MongoClient()
 pymongo.MongoClient = lambda *a, **k: _f
@@ -133,7 +134,7 @@ check('voiding twice does not return the stock twice', bal('Paracetamol 500mg ta
 print('\n--- 4. Cash-up ---')
 reset(); login()
 sell([('Paracetamol 500mg tabs', 10)])
-sell([('Paracetamol 500mg tabs', 4)], payment_method='M-Pesa')
+sell([('Paracetamol 500mg tabs', 4)], payment_method='M-Pesa', payment_ref='QK12AB34')
 page = c.get('/sales').get_data(as_text=True)
 check("today's cash-up lists cash and M-Pesa", 'Cash' in page and 'M-Pesa' in page)
 check('and the day total', '7.00' in page)
@@ -179,5 +180,122 @@ check('the till page loads', c.get('/sell').status_code == 200)
 pl = c.get('/api/pos/products').get_json()
 check('the till item list carries price, stock and the Rx flag',
       any(p['name'] == 'Amlodipine 5mg tabs' and p['rx_only'] and p['price'] == 1.10 for p in pl))
+
+print('\n--- 7. Mobile money codes ---')
+reset(); login()
+r = sell([('Paracetamol 500mg tabs', 2)], payment_method='EcoCash')
+check('EcoCash without the transaction code is refused', r.status_code == 422 and sales.count_documents({}) == 0)
+r = sell([('Paracetamol 500mg tabs', 2)], payment_method='EcoCash', payment_ref='bad code!')
+check('a code with odd characters is refused', r.status_code == 422)
+r = sell([('Paracetamol 500mg tabs', 2)], payment_method='EcoCash', payment_ref='ECO-55X21')
+check('with the code it sells and keeps it', r.status_code == 302 and sales.find_one()['payment_ref'] == 'ECO-55X21')
+check('the receipt shows the code', 'ECO-55X21' in c.get('/sales/' + sales.find_one()['receipt_no']).get_data(as_text=True))
+r = sell([('Paracetamol 500mg tabs', 1)])
+check('cash needs no code', r.status_code == 302)
+
+print('\n--- 8. Paper receipts entered late ---')
+import app as _app
+reset(); login(role='employee', name='Nurse On Duty')
+yday = (_app.local_now() - timedelta(days=1)).strftime('%Y-%m-%d')
+r = sell([('Paracetamol 500mg tabs', 6)], paper_sale='on', paper_date=yday, paper_time='10:30')
+check('a paper sale needs the paper receipt number', r.status_code == 422 and sales.count_documents({}) == 0)
+future = (_app.local_now() + timedelta(days=2)).strftime('%Y-%m-%d')
+r = sell([('Paracetamol 500mg tabs', 6)], paper_sale='on', paper_date=future, paper_time='10:30', paper_receipt_no='P1')
+check('a paper sale cannot be dated in the future', r.status_code == 422)
+old = (_app.local_now() - timedelta(days=30)).strftime('%Y-%m-%d')
+r = sell([('Paracetamol 500mg tabs', 6)], paper_sale='on', paper_date=old, paper_time='10:30', paper_receipt_no='P1')
+check('nor more than two weeks back', r.status_code == 422)
+r = sell([('Paracetamol 500mg tabs', 6)], paper_sale='on', paper_date=yday, paper_time='10:30', paper_receipt_no='P0042')
+s1 = sales.find_one()
+check('a paper sale is recorded and takes the stock', r.status_code == 302 and bal('Paracetamol 500mg tabs') == 94)
+check('it is dated when it happened', _app.to_local(s1['timestamp'], '%Y-%m-%d %H:%M') == f'{yday} 10:30',
+      _app.to_local(s1['timestamp']))
+t = txs.find_one({'type': 'dispense'})
+check('and so is its stock line', t['date'] == yday)
+check('it is marked as entered late, awaiting approval',
+      s1['late_entry']['paper_receipt_no'] == 'P0042' and s1['late_entry']['approved'] is False
+      and s1['late_entry']['entered_by'] == 'Nurse On Duty')
+page = c.get('/sales').get_data(as_text=True)
+check('the sales page lists it for approval', 'Paper receipts entered late' in page and 'P0042' in page)
+c.post('/sales/approve', data={'receipt_no': s1['receipt_no']})
+check('a non-admin cannot approve it', sales.find_one()['late_entry']['approved'] is False)
+login()
+c.post('/sales/approve', data={'receipt_no': s1['receipt_no']})
+s1 = sales.find_one()
+check('an admin approves it', s1['late_entry']['approved'] is True and s1['late_entry']['approved_by'])
+check('and it leaves the approval list', 'Paper receipts entered late' not in c.get('/sales').get_data(as_text=True))
+
+print('\n--- 9. Barcodes and the pricing guard ---')
+reset(); login()
+base = {'med_name': 'Paracetamol 500mg tabs', 'batch': 'B1', 'category': 'Pharmaceutical',
+        'pack_size': '100', 'pack_price': '20', 'expiry_date': '2028-01-01',
+        'schedule': 'not controlled', 'selling_price': '0.50'}
+c.post('/edit-medication', data={**base, 'barcode': '6001234567890'})
+check('a barcode is saved', meds.find_one({'name': 'Paracetamol 500mg tabs'})['barcode'] == '6001234567890')
+pl = c.get('/api/pos/products').get_json()
+check('the till list carries it', any(p['barcode'] == '6001234567890' for p in pl))
+r = c.post('/edit-medication', data={'med_name': 'Vitamin C 1000mg', 'batch': 'B1', 'category': 'Pharmaceutical',
+                                     'pack_size': '10', 'pack_price': '20', 'expiry_date': '2028-01-01',
+                                     'schedule': 'not controlled', 'selling_price': '4.50',
+                                     'barcode': '6001234567890'})
+check('the same barcode cannot go on a second product',
+      'already used' in r.get_data(as_text=True) and not meds.find_one({'name': 'Vitamin C 1000mg'}).get('barcode'))
+r = c.post('/edit-medication', data={**base, 'selling_price': '0.10'})
+check('a price below cost is saved with a warning', 'below the cost' in r.get_data(as_text=True)
+      and meds.find_one({'name': 'Paracetamol 500mg tabs'})['selling_price'] == 0.10)
+check('the warning suggests the markup price', 'M0.36' in r.get_data(as_text=True), str(_app.MARKUP_PERCENT))
+r = c.post('/edit-medication', data={**base, 'barcode': 'has space'})
+check('a barcode with spaces is refused', 'Invalid input' in r.get_data(as_text=True))
+
+print('\n--- 10. Chronic medicines set refill reminders ---')
+reset(); login()
+meds.update_one({'name': 'Amlodipine 5mg tabs'}, {'$set': {'chronic': True, 'units_per_day': 1}})
+calls = []
+class _Resp:
+    def __init__(self, code): self.status_code = code
+def fake_post(url, **kw):
+    calls.append((url, kw)); return _Resp(200)
+_app.requests.post = fake_post
+os.environ['WEBSITE_URL'] = 'https://site.example/'
+os.environ['TILL_SYNC_SECRET'] = 'sync-secret'
+rx = {'customer': 'Mpho Lerato', 'prescription_no': 'RX5'}
+r = sell([('Amlodipine 5mg tabs', 30)], reminder_opt_in='on', **rx)
+check('agreeing to reminders needs an email or phone', r.status_code == 422 and not calls)
+r = sell([('Amlodipine 5mg tabs', 30)], reminder_opt_in='on', reminder_email='not-an-email', **rx)
+check('a bad email is refused', r.status_code == 422)
+r = sell([('Amlodipine 5mg tabs', 30)], reminder_opt_in='on', reminder_email='mpho@example.com', **rx)
+check('the sale goes through', r.status_code == 302)
+check('the website is told once', len(calls) == 1 and calls[0][0] == 'https://site.example/api/reminders/from-till')
+body = calls[0][1]['json']
+check('with name, contact, days supply and sale date', body['name'] == 'Mpho Lerato'
+      and body['email'] == 'mpho@example.com' and body['days_supply'] == 30
+      and body['sold_on'] == _app.local_now().strftime('%Y-%m-%d'), str(body))
+check('but never the medicine', 'Amlodipine' not in json.dumps(body))
+check('using the shared secret', calls[0][1]['headers']['Authorization'] == 'Bearer sync-secret')
+s2 = sales.find_one()
+check('the sale records the reminder as sent', s2['reminder']['status'] == 'sent')
+page = c.get('/sales/' + s2['receipt_no']).get_data(as_text=True)
+check('the receipt shows the next refill date', 'Next refill due' in page)
+calls.clear(); reset(); login()
+meds.update_one({'name': 'Amlodipine 5mg tabs'}, {'$set': {'chronic': True, 'units_per_day': 2}})
+sell([('Amlodipine 5mg tabs', 30)], reminder_opt_in='on', reminder_phone='(+266) 5812 3456', **rx)
+check('two a day: 30 tablets last 15 days', calls and calls[0][1]['json']['days_supply'] == 15)
+check('a phone-only patient is sent with no email', calls[0][1]['json']['email'] is None)
+calls.clear(); reset(); login()
+meds.update_one({'name': 'Amlodipine 5mg tabs'}, {'$set': {'chronic': True, 'units_per_day': 1}})
+sell([('Amlodipine 5mg tabs', 5)], reminder_opt_in='on', reminder_phone='58123456', **rx)
+check('a supply under a week sets no reminder', not calls and not sales.find_one().get('reminder'))
+calls.clear(); reset(); login()
+sell([('Paracetamol 500mg tabs', 5)], reminder_opt_in='on', customer='X Y', reminder_phone='58123456')
+check('nothing chronic in the basket: no reminder', not calls)
+reset(); login()
+meds.update_one({'name': 'Amlodipine 5mg tabs'}, {'$set': {'chronic': True, 'units_per_day': 1}})
+def down(url, **kw):
+    raise _app.requests.ConnectionError('offline')
+_app.requests.post = down
+r = sell([('Amlodipine 5mg tabs', 30)], reminder_opt_in='on', reminder_email='mpho@example.com', **rx)
+check('if the website is down the sale still goes through', r.status_code == 302 and bal('Amlodipine 5mg tabs') == 30)
+check('and the reminder waits to be retried', sales.find_one()['reminder']['status'] == 'pending')
+_app.requests.post = fake_post
 
 print(f'\n{len(PASS)} passed, {len(FAIL)} failed')
