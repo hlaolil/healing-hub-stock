@@ -78,6 +78,43 @@ python tests/run_all.py
 
 24 suites, 1,764 checks, run against an in-memory database. `tests/test_pos.py` covers the till, receipts, voids, cash-up and the public feed.
 
+## Run it on your own computer
+
+You need **Python 3.12**, **Git** and **Docker Desktop** (for the database).
+
+1. Start a local database (MongoDB) in the background:
+   ```bash
+   docker compose up -d
+   ```
+2. Create a virtual environment and install the packages:
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate        # Windows: .venv\Scripts\activate
+   pip install -r requirements.txt
+   ```
+3. Copy the settings file and adjust it if you like:
+   ```bash
+   cp .env.example .env             # Windows: copy .env.example .env
+   ```
+4. Start the app:
+   ```bash
+   python app.py
+   ```
+   Open http://localhost:5000, go to `/register`, enter the `ADMIN_PASSWORD` from `.env`, and create your admin account.
+
+On a Mac, if port 5000 is taken (AirPlay Receiver uses it), set `PORT=5001` in `.env` and use that port everywhere below.
+
+**With the website:** run the website too (see its README). The website reads products from this app and this app sends refill reminders to the website, so both `.env` files must point at each other and share the same `TILL_SYNC_SECRET`.
+
+**The evening job by hand** (owner emails and reminder retries):
+```bash
+curl -H "Authorization: Bearer local-cron-secret" http://localhost:5000/api/cron/daily
+```
+
+**Tests** use a fake database, so they don't need Docker: `python tests/run_all.py`.
+
+Your local data lives only in the Docker volume on your computer. `docker compose down` stops the database and keeps the data; `docker compose down -v` deletes it.
+
 ## Retail features
 
 - **Point of sale** (`/sell`): scan a barcode (a USB scanner types the code and presses Enter) or type the item name. M-Pesa and EcoCash sales need the transaction code from the confirmation SMS.

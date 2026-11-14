@@ -1,0 +1,15 @@
+# Local MongoDB for development: `docker compose up -d`
+# The stock app then connects with MONGODB_URI=mongodb://localhost:27017
+# Data is kept in the "mongo-data" volume between restarts;
+# `docker compose down -v` deletes it and starts you fresh.
+services:
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    restart: unless-stopped
+
+volumes:
+  mongo-data:
