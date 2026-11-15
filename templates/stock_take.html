@@ -23,6 +23,31 @@
   .st-agree input { width: 22px; height: 22px; }
   .st-changed { background: #fff3cd; border-color: #e0a800 !important; }
 </style>
+<style>
+.st-downloads { font-size: 13px; margin: -4px 0 12px; }
+.st-downloads ul { list-style: none; padding: 0; margin: 6px 0; display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.st-n { color: #4A635A; }
+.st-groups { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+#st_sheet_form .st-groups button { padding: 5px 11px; font-size: 13px; margin: 0; width: auto;
+    min-height: 0; border-radius: 14px; background: #fff; color: #2A7D56; border: 1px solid #2A7D56;
+    box-shadow: none; transition: none; transform: none; opacity: 1; font-weight: 600; }
+#st_sheet_form .st-groups button span { font-weight: 400; opacity: .8; }
+#st_sheet_form .st-groups button.on { background: #2A7D56; color: #fff; }
+</style>
+<style>
+.st-edited { background: #fff3cd; color: #7a5a00; padding: 0 5px; border-radius: 8px; cursor: help; }
+.st-edit-btn { padding: 3px 10px; font-size: 13px; margin: 0; }
+.st-edit-row td { background: #F3F8F5; }
+.st-edit-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+    margin: 0; padding: 4px 0; background: none; box-shadow: none;
+    /* the table scrolls sideways on a phone; keep the form on screen */
+    position: sticky; left: 8px; max-width: calc(100vw - 56px); }
+.st-edit-form label { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 14px; }
+.st-edit-form input[type=number] { width: 6em; }
+.st-edit-form input[type=text] { width: 22em; max-width: 100%; }
+.st-edit-form button { margin: 0; padding: 5px 12px; }
+.st-edit-form small { flex-basis: 100%; color: #4A635A; }
+</style>
 {% endblock %}
 {% block content %}{% if message %}
     <p class="message {% if 'success' in message|lower or 'recorded' in message|lower or 'closed' in message|lower or 'opened' in message|lower %}success{% else %}error{% endif %}">{{ message }}</p>
@@ -93,9 +118,56 @@ you counted, so the register shows which items were checked against the system
 and which were counted outright. If you tick a row and also type a count, the
 count is the one that is recorded. For controlled drugs, counting is safer than
 ticking.</p>
-<form method="POST" action="{{ url_for('stock_take') }}">
+{% from "_uploads.html" import upload_box, upload_styles %}
+{{ upload_styles() }}
+{% call upload_box(url_for('stock_take'), 'Counted on paper or in Excel? Upload the counts.', 'upload_counts',
+                   {'stock_take_id': active._id|string},
+                   url_for('stock_take', stock_take_id=active._id|string, download='sheet'),
+                   'Download the count sheet below, fill in the Physical count column (and expiry or '
+                   ~ 'batch where they differ), and upload it. The figures fill this sheet for checking; '
+                   ~ 'nothing is posted until you press Post Counts.') %}
+{% endcall %}
+<div class="st-downloads">
+    <strong>&darr; Download a count sheet</strong> (the items still to count, with what the system has):
+    <ul>
+    {% for g, label in count_groups if group_counts[g] %}
+        <li><a href="{{ url_for('stock_take', stock_take_id=active._id|string, download='sheet', group=g) }}">{{ label }}</a>
+            <span class="st-n">{{ group_counts[g] }}</span></li>
+    {% endfor %}
+        <li><a href="{{ url_for('stock_take', stock_take_id=active._id|string, download='sheet') }}">Everything on one sheet</a>
+            <span class="st-n">{{ sheet|length }}</span></li>
+    </ul>
+    <small>Upload each one when it is counted. The uploads add up, so you can post them together or one at a time.</small>
+</div>
+{% if upload_draft %}
+<div class="message partial" style="font-size:14px;">
+    <strong>{{ upload_draft.rows|length }} row(s) filled from &ldquo;{{ upload_draft.meta.sheet }}&rdquo;</strong>,
+    shown below in yellow. Check them, then press <strong>Post Counts</strong> &mdash;
+    or, if you have not changed anything, <strong>Post Uploaded Counts</strong> posts them as uploaded.
+    {% if upload_draft.meta.guesses %}<br>Matched by a close spelling &mdash; check: {{ upload_draft.meta.guesses|join('; ') }}.{% endif %}
+    {% if upload_draft.meta.unknown %}<br>Not on the medication list, left out: {{ upload_draft.meta.unknown|join('; ') }}.{% endif %}
+    {% if upload_draft.meta.bad %}<br>Not read: {{ upload_draft.meta.bad|join('; ') }}.{% endif %}
+    <form method="POST" action="{{ url_for('stock_take') }}" style="display:inline;margin:0;padding:0;background:none;box-shadow:none;">
+        <input type="hidden" name="action" value="post_uploaded">
+        <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
+        <button type="submit" style="padding:4px 10px;font-size:13px;margin:6px 6px 0 0;">Post Uploaded Counts</button>
+    </form>
+    <form method="POST" action="{{ url_for('stock_take') }}" style="display:inline;margin:0;padding:0;background:none;box-shadow:none;">
+        <input type="hidden" name="action" value="discard_counts">
+        <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
+        <button type="submit" style="padding:4px 10px;font-size:13px;margin:6px 0 0;">Clear Uploaded Figures</button>
+    </form>
+</div>
+{% endif %}
+<form method="POST" action="{{ url_for('stock_take') }}" id="st_sheet_form">
     <input type="hidden" name="action" value="count_sheet">
     <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
+    <div class="st-groups" role="group" aria-label="Show one group">
+        <button type="button" class="on" data-group="">All <span>{{ sheet|length }}</span></button>
+        {% for g, label in count_groups if group_counts[g] %}
+        <button type="button" data-group="{{ g }}">{{ label }} <span>{{ group_counts[g] }}</span></button>
+        {% endfor %}
+    </div>
     <p>
         <input type="text" id="st_filter" placeholder="Filter this list..."
                onkeyup="stFilter()" style="width:16em;">
@@ -113,23 +185,27 @@ ticking.</p>
         </thead>
         <tbody>
         {% for m in sheet %}
-            <tr>
-                <td>{{ m.name }}<input type="hidden" name="med_name" value="{{ m.name }}"></td>
+            <tr data-group="{{ m.group }}"{% if m.pre %} class="close-to-expire" title="filled from the uploaded sheet"{% endif %}>
+                <td>{{ m.name }}<input type="hidden" name="med__{{ loop.index0 }}" value="{{ m.name }}"></td>
                 <td class="st-system">{{ m.balance }}</td>
                 <td class="st-agree"><input name="agree__{{ loop.index0 }}" type="checkbox"
                            aria-label="{{ m.name }} matches the system"></td>
                 <td><input name="counted__{{ loop.index0 }}" type="number" min="0"
-                           class="st-count" style="width:7em;" autocomplete="off"></td>
+                           class="st-count" style="width:7em;" autocomplete="off"
+                           {#- Only a figure someone counted, from an uploaded sheet;
+                               never the system's own balance. -#}
+                           {% if m.pre and m.pre.counted != '' %} value="{{ m.pre.counted }}"{% endif %}></td>
                 {# Filled with what is on file. Leave it and nothing changes;
                    change it and the old value is kept on the counted line. #}
                 <td><input name="expiry__{{ loop.index0 }}" type="date" class="st-detail"
-                           value="{{ m.expiry }}" data-orig="{{ m.expiry }}"
+                           value="{{ (m.pre.expiry if m.pre and m.pre.expiry) or m.expiry }}" data-orig="{{ m.expiry }}"
                            style="width:10em;" autocomplete="off"></td>
                 <td><input name="batch__{{ loop.index0 }}" type="text" class="st-detail"
-                           value="{{ m.batch }}" data-orig="{{ m.batch }}"
+                           value="{{ (m.pre.batch if m.pre and m.pre.batch) or m.batch }}" data-orig="{{ m.batch }}"
                            style="width:9em;" autocomplete="off" maxlength="40"></td>
                 <td><input name="note__{{ loop.index0 }}" type="text"
-                           style="width:14em;" placeholder="Shelf, remarks"></td>
+                           style="width:14em;" placeholder="Shelf, remarks"
+                           value="{{ m.pre.note if m.pre else '' }}"></td>
             </tr>
         {% else %}
             <tr><td colspan="7">Every medication has been counted in this stock take.</td></tr>
@@ -172,15 +248,61 @@ document.addEventListener('DOMContentLoaded', function () {
         d.addEventListener('change', mark);
     });
 });
+// Only the rows with something in them are sent. A row left as it came
+// (no count, not ticked, expiry and batch as on file, no note) is switched
+// off just before sending, so a 300-line sheet goes as a few lines.
+function stRowUntouched(tr) {
+    var get = function (sel) { return tr.querySelector(sel); };
+    var count = get('input[name^="counted__"]'), box = get('input[name^="agree__"]');
+    var note = get('input[name^="note__"]');
+    if (count && count.value.trim() !== '') return false;
+    if (box && box.checked) return false;
+    if (note && note.value.trim() !== '') return false;
+    var details = tr.querySelectorAll('.st-detail');
+    for (var i = 0; i < details.length; i++) {
+        if (details[i].value !== (details[i].dataset.orig || '')) return false;
+    }
+    return true;
+}
+document.addEventListener('DOMContentLoaded', function () {
+    var form = document.getElementById('st_sheet_form');
+    if (!form) return;
+    form.addEventListener('submit', function () {
+        form.querySelectorAll('#st_sheet tbody tr').forEach(function (tr) {
+            if (!stRowUntouched(tr)) return;
+            tr.querySelectorAll('input').forEach(function (inp) { inp.disabled = true; });
+        });
+    });
+});
+// Coming back with the Back button, switch every row on again.
+window.addEventListener('pageshow', function () {
+    document.querySelectorAll('#st_sheet tbody input:disabled').forEach(function (inp) {
+        inp.disabled = false;
+    });
+});
+// The group buttons and the filter box work together: a row shows when it
+// is in the chosen group and matches what is typed. Hiding never clears
+// anything entered, and Post Counts still sends every filled row.
+var stGroup = '';
 function stFilter() {
     var q = document.getElementById('st_filter').value.toLowerCase();
     var rows = document.querySelectorAll('#st_sheet tbody tr');
     for (var i = 0; i < rows.length; i++) {
         var cell = rows[i].cells[0];
-        if (!cell) { continue; }
-        rows[i].style.display = cell.textContent.toLowerCase().indexOf(q) > -1 ? '' : 'none';
+        if (!cell || !rows[i].dataset.group) { continue; }
+        var inGroup = !stGroup || rows[i].dataset.group === stGroup;
+        rows[i].style.display = inGroup && cell.textContent.toLowerCase().indexOf(q) > -1 ? '' : 'none';
     }
 }
+document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('.st-groups button');
+    if (!b) return;
+    stGroup = b.dataset.group || '';
+    document.querySelectorAll('.st-groups button').forEach(function (x) {
+        x.classList.toggle('on', x === b);
+    });
+    stFilter();
+});
 </script>
 
 {# One item on its own. The sheet is for walking the shelves; this is for the
@@ -231,7 +353,7 @@ may be left blank if you only need to fix an expiry date or a batch number
 </form>
 {% endif %}
 
-<h3>Counted Items ({{ counts|length }})</h3>
+<h3 id="counted">Counted Items ({{ counts|length }})</h3>
 {% if counts %}
 <form method="GET" action="{{ url_for('stock_take') }}" style="display:inline">
     <button type="submit" name="export" value="csv">Download CSV</button>
@@ -246,7 +368,7 @@ may be left blank if you only need to fix an expiry date or a batch number
     <thead>
         <tr><th>Counted At</th><th>Medication</th><th>System Balance</th><th>Physical Count</th>
             <th>Variance</th><th>Discrepancy Type</th><th>Expiry</th><th>Batch</th>
-            <th>Counted By</th><th>Note</th></tr>
+            <th>Counted By</th><th>Note</th>{% if active.status == 'open' %}<th></th>{% endif %}</tr>
     </thead>
     <tbody>
     {# A line with no count corrected an expiry or a batch and moved no stock,
@@ -257,7 +379,8 @@ may be left blank if you only need to fix an expiry date or a batch number
             <td>{{ c.timestamp.strftime('%Y-%m-%d %H:%M') }}</td>
             <td>{{ c.med_name }}</td>
             <td>{{ c.system_balance }}</td>
-            <td>{% if c.counted is none %}&ndash;{% else %}{{ c.counted }}{% endif %}</td>
+            <td>{% if c.counted is none %}&ndash;{% else %}{{ c.counted }}{% endif %}
+                {%- if c.edits %} <small class="st-edited" title="{% for e in c.edits %}{{ e.at.strftime('%d %b %H:%M') }}: {{ '(none)' if e['from'] is none else e['from'] }} &rarr; {{ e.to }} by {{ e.by }} &mdash; {{ e.reason }}{% if not loop.last %}&#10;{% endif %}{% endfor %}">edited</small>{% endif %}</td>
             <td>{% if c.variance is none %}&ndash;{% else %}{{ '%+g'|format(c.variance) }}{% endif %}</td>
             <td>{% if c.variance is none %}Detail only{% else %}{{ c.discrepancy_label }}{% if c.method == 'confirmed' %} <small>(ticked)</small>{% endif %}{% endif %}</td>
             <td>{% if c.expiry_after %}
@@ -271,12 +394,48 @@ may be left blank if you only need to fix an expiry date or a batch number
                     {%- else -%}{{ c.batch_after }}{%- endif -%}
                 {% else %}&ndash;{% endif %}</td>
             <td>{{ c.counted_by }}</td>
-            <td>{{ c.note or '-' }}</td>
+            <td>{{ c.note or '-' }}
+                {%- for e in c.edits or [] %}<br><small>Edited {{ e.at.strftime('%d %b %H:%M') }} by {{ e.by }}: {{ '(none)' if e['from'] is none else e['from'] }} &rarr; {{ e.to }} &mdash; {{ e.reason }}</small>{% endfor %}</td>
+            {% if active.status == 'open' %}
+            <td><button type="button" class="st-edit-btn" data-for="ed_{{ c._id }}">Edit</button></td>
+            {% endif %}
         </tr>
+        {% if active.status == 'open' %}
+        <tr class="st-edit-row" id="ed_{{ c._id }}" hidden>
+            <td colspan="11">
+                <form method="POST" action="{{ url_for('stock_take') }}" class="st-edit-form">
+                    <input type="hidden" name="action" value="edit_count">
+                    <input type="hidden" name="stock_take_id" value="{{ active._id|string }}">
+                    <input type="hidden" name="count_id" value="{{ c._id }}">
+                    <strong>{{ c.med_name }}</strong>
+                    <label>Correct count
+                        <input type="number" name="counted" min="0" step="1" required
+                               value="{{ c.counted if c.counted is not none else '' }}" inputmode="numeric"></label>
+                    <label>Why
+                        <input type="text" name="reason" required maxlength="200"
+                               placeholder="e.g. miscounted, a box was on the other shelf"></label>
+                    <button type="submit">Save</button>
+                    <button type="button" class="st-edit-cancel" data-for="ed_{{ c._id }}">Cancel</button>
+                    <small>System had {{ c.system_balance }} when counted. The balance moves by the difference only, so
+                        anything dispensed since stays counted.</small>
+                </form>
+            </td>
+        </tr>
+        {% endif %}
     {% else %}
-        <tr><td colspan="10">Nothing counted yet in this stock take.</td></tr>
+        <tr><td colspan="11">Nothing counted yet in this stock take.</td></tr>
     {% endfor %}
     </tbody>
 </table></div>
+<script>
+document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('.st-edit-btn, .st-edit-cancel');
+    if (!b) return;
+    var row = document.getElementById(b.dataset.for);
+    if (!row) return;
+    row.hidden = b.classList.contains('st-edit-cancel') ? true : !row.hidden;
+    if (!row.hidden) { var n = row.querySelector('input[type=number]'); if (n) { n.focus(); n.select(); } }
+});
+</script>
 {% endif %}
 {% endblock %}

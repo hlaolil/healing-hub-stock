@@ -123,3 +123,12 @@ Your local data lives only in the Docker volume on your computer. `docker compos
 - **Pricing guard**: product forms suggest a selling price from the cost at `MARKUP_PERCENT`, and saving a price below cost shows a warning.
 - **Owner Reports** (`/owner-reports`, admin): refill adherence (refills collected on time), items running low, stock expiring within 90 days, items priced below cost, and the last price paid to each supplier.
 - **Owner emails**: every evening at 18:30 (Vercel Cron, `vercel.json`) the owner gets the day's sales by payment method, voids, write-offs, late paper entries, unmet demand and missing temperature readings. On `WEEKLY_ALERT_DAY` the weekly alerts come too. The same job retries refill reminders that could not reach the website.
+- **Spreadsheet uploads** (Excel or CSV; every upload is shown for checking first, and nothing changes until you press the page's own button):
+  - *Add Medication*: load many new products at once, with cost, opening stock, batch and expiry, and the shop columns (selling price, prescription only, show on website, website category, chronic, units per day, barcode). Download the template from the page.
+  - *Receiving*: read a supplier's invoice spreadsheet into the delivery (units or packs, pack or unit prices or line totals; Total and VAT rows are skipped; expiries like "12/26" are read).
+  - *Stock Take*: download a count sheet by shelf group (pharmaceuticals, supplies, controlled drugs), fill it in, upload it, then post. A count posted wrongly can be edited later; stock moves by the difference only.
+  - Half-checked uploads are kept as drafts until posted or discarded.
+- **Product codes and renames**: every product gets a permanent code (MED-0001 ...; an official code can replace it). Renaming a product moves its stock records, stock-take counts and till receipts to the new name, and the old name still matches in spreadsheets. Many products can be renamed at once from a list on the Add Medication page.
+
+These upload, code and rename features come from HealthRecords (November 2026), adapted for the shop.
+

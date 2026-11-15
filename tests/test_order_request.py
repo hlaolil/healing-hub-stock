@@ -132,7 +132,7 @@ sid = str(db['stock_takes'].find_one({'status': 'open'})['_id'])
 body = c.get(f'/stock-take?stock_take_id={sid}').data.decode()
 # the datalist was replaced by a full count sheet — check the sheet's row order
 sheet = body[body.index('Count Sheet'):]
-rows = _re.findall(r'<td>([^<]+)<input type="hidden" name="med_name"', sheet)
+rows = _re.findall(r'<input type="hidden" name="med__\d+" value="([^"]+)"', sheet)
 check('stock take count sheet is alphabetical',
       rows == ['diazepam, 5 mg', 'Morphine, 10 mg', 'Zolpidem, 10 mg'], str(rows))
 

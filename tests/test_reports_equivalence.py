@@ -86,6 +86,7 @@ for name in names:
 def expected_inventory(name):
     """Naive independent recomputation straight from the raw documents."""
     d = r = a = 0
+    found = missing = 0  # stock-take corrections in the period, by direction
     ld = lr = la = 0   # after the period
     for tx in txs.find({'med_name': name}):
         ts = tx['timestamp']
@@ -105,15 +106,22 @@ def expected_inventory(name):
             r += tx['quantity']
         else:
             a += tx['quantity']
+            if tx['quantity'] > 0:
+                found += tx['quantity']
+            else:
+                missing -= tx['quantity']
     # The stored balance is today's. The balance at the end of May is today's
     # with everything after May undone. Leaving it out compared May's figures
     # against today's shelf - the bug this used to agree with.
     cur = meds.find_one({'name': name})['balance'] - lr + ld - la
     beg = max(0, cur - r + d - a)
     days = (END.date() - START.date()).days + 1
-    # Issued is everything that left: dispensed, less the net of stock-take
-    # corrections (a count that found more takes it off).
-    issued = d - a
+    # Issued is everything that left: dispensed plus stock found missing at a
+    # count. Stock FOUND at a count comes off Issued first; what Issued cannot
+    # absorb shows with Received, as a delivery that was never booked in.
+    out = d + missing
+    issued = max(0, out - found)
+    r = r + max(0, found - out)
     # Adjusted AMC: consumption scaled to 30 days, a whole number rounded
     # half up. No unmet demand in this data, so it is the plain AMC rounded.
     adj = int(d / days * 30 + 0.5)
