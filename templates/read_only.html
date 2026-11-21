@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}View Only &middot; The Healing Hub Pharmacy{% endblock %}
+{% block heading %}This is the online copy, for viewing only{% endblock %}
+{% block nav %}{% endblock %}
+{% block content %}
+<p class="message partial">Nothing was saved and nothing was changed.</p>
+<p>The pharmacy's records are kept on the computer in the shop. Make the change there,
+then upload, and it will appear here too. A change made here would be overwritten at the
+next upload, which is why it is refused.</p>
+<p><a href="{{ back }}">Go back</a></p>
+{% endblock %}

@@ -1,7 +1,10 @@
-# Local MongoDB for development: `docker compose up -d`
-# The stock app then connects with MONGODB_URI=mongodb://localhost:27017
+# The shop setup: the app and its own database on one computer.
+#   docker compose up -d --build     start (and rebuild after an update)
+# Tills, phones and laptops on the shop Wi-Fi open http://<this computer's IP>:5000
+# Both services restart by themselves when the computer is switched on, as long
+# as Docker Desktop is set to start at login.
 # Data is kept in the "mongo-data" volume between restarts;
-# `docker compose down -v` deletes it and starts you fresh.
+# `docker compose down -v` DELETES it.
 services:
   mongo:
     image: mongo:7
@@ -9,6 +12,18 @@ services:
       - "27017:27017"
     volumes:
       - mongo-data:/data/db
+    restart: unless-stopped
+
+  app:
+    build: .
+    env_file: .env
+    environment:
+      MONGODB_URI: mongodb://mongo:27017
+      SHOP_MODE: "1"
+    ports:
+      - "5000:5000"
+    depends_on:
+      - mongo
     restart: unless-stopped
 
 volumes:

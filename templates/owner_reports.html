@@ -1,16 +1,46 @@
 {% extends "base.html" %}
 {% block title %}Owner Reports &middot; The Healing Hub Pharmacy{% endblock %}
 {% block heading %}Owner Reports{% endblock %}
+{% block page_styles %}
+<style>
+.wa-btn { display:inline-block; background:#1F7A4D; color:#fff !important; padding:10px 16px;
+          border-radius:6px; text-decoration:none; font-weight:bold; }
+</style>
+{% endblock %}
 {% block content %}
 {% if message %}<p class="message {{ message_class or 'success' }}">{{ message }}</p>{% endif %}
 
-<p>The daily summary is emailed every evening, and the weekly alerts every
-{{ weekly_day }}, to <strong>{{ owner_email or 'nobody yet (set GMAIL_USER and GMAIL_APP_PASSWORD)' }}</strong>.</p>
-<form method="POST" style="display:flex;gap:8px;flex-wrap:wrap;">
-    <button type="submit" name="send" value="daily">Email today's summary now</button>
-    <button type="submit" name="send" value="weekly">Email the weekly alerts now</button>
-    <button type="submit" name="send" value="retry">Retry refill reminders</button>
+{% if can_upload %}
+<h2>Upload to cloud</h2>
+<p>{% if upload.last %}Last upload: <strong>{{ upload.when }}</strong> by {{ upload.last.by }}
+({{ upload.last.sent }} record(s) sent).{% else %}Nothing has been uploaded yet.{% endif %}
+Connect this computer to the network, then press the button. Only records that changed since the last
+upload are sent, so it is quick.</p>
+<form method="POST" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
+    <button type="submit" name="send" value="upload">Upload to cloud now</button>
+    <label style="font-weight:normal;"><input type="checkbox" name="full" value="1" style="width:auto;">
+        Full upload (checks every record; use if the online copy looks wrong)</label>
 </form>
+{% elif read_only %}
+<p class="message partial">This is the online copy. It shows the shop's records as at the last upload
+({{ upload.when or 'never' }}).</p>
+{% endif %}
+
+<h2>Send on WhatsApp</h2>
+<p>Each button opens WhatsApp with the message written. Check it, then press Send.
+{% if owner_whatsapp %}It goes to +{{ owner_whatsapp }}.{% else %}No owner number is set
+(OWNER_WHATSAPP), so WhatsApp will ask who to send it to.{% endif %}
+The weekly alerts are best sent every {{ weekly_day }}, so orders can go in before the weekend.</p>
+<p style="display:flex;gap:8px;flex-wrap:wrap;">
+    <a class="wa-btn" href="{{ wa_daily }}" target="_blank" rel="noopener">Send today's summary</a>
+    <a class="wa-btn" href="{{ wa_weekly }}" target="_blank" rel="noopener">Send the weekly alerts</a>
+</p>
+{% if email_on and not read_only %}
+<form method="POST" style="display:flex;gap:8px;flex-wrap:wrap;">
+    <button type="submit" name="send" value="daily">Email today's summary instead</button>
+    <button type="submit" name="send" value="weekly">Email the weekly alerts instead</button>
+</form>
+{% endif %}
 
 <h2>Refill adherence</h2>
 {% set a = weekly.adherence %}

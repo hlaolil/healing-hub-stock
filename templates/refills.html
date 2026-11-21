@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Refill Calls &middot; The Healing Hub Pharmacy{% endblock %}
+{% block heading %}Refill Calls{% endblock %}
+{% block content %}
+{% if message %}<p class="message {{ message_class or 'success' }}">{{ message }}</p>{% endif %}
+
+<p>Chronic patients whose refill is due within the next {{ ahead }} days, or up to {{ back }} days late,
+most late first. Someone who has already come back is not listed. Press <strong>WhatsApp</strong>:
+the message opens ready to send, and it is marked as sent here. The message never names the medicine.
+Patients without a WhatsApp number need a phone call.</p>
+
+<div class="table-scroll"><table>
+    <thead><tr><th>Patient</th><th>Phone</th><th>Refill due</th><th>Status</th><th>Messaged</th><th></th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+    <tr>
+        <td>{{ r.name }}</td>
+        <td>{{ r.phone or r.email or '–' }}</td>
+        <td>{{ r.due }}</td>
+        <td>{% if r.days_left < 0 %}<strong>{{ -r.days_left }} day(s) late</strong>
+            {% elif r.days_left == 0 %}<strong>due today</strong>
+            {% else %}due in {{ r.days_left }} day(s){% endif %}</td>
+        <td>{% if r.messaged %}{{ r.messaged }}{% if r.messaged_by %} by {{ r.messaged_by }}{% endif %}{% else %}–{% endif %}</td>
+        <td>{% if r.has_whatsapp %}
+            <form method="POST" action="/refills/whatsapp" target="_blank" style="margin:0;"
+                  onsubmit="setTimeout(function(){ location.reload(); }, 1500);">
+                <input type="hidden" name="receipt_no" value="{{ r.receipt_no }}">
+                <button type="submit">{% if r.messaged %}Send again{% else %}WhatsApp{% endif %}</button>
+            </form>
+            {% else %}Phone{% endif %}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">Nobody is due for a refill this week.</td></tr>
+    {% endfor %}
+    </tbody>
+</table></div>
+{% endblock %}

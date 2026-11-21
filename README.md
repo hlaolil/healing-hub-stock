@@ -46,9 +46,13 @@ Environment variables:
 | `MONGODB_DB` | Database name, default `healing_hub`. The app refuses `pharmacy_db` (the NMC clinic's database), so the two apps can share one Atlas cluster without sharing data |
 | `WEBSITE_URL` | The public website, e.g. `https://healinghubpharmacy.vercel.app`. Chronic sales send refill reminders there |
 | `TILL_SYNC_SECRET` | Long random string, **the same** as on the website. Proves reminders come from the till |
-| `GMAIL_USER`, `GMAIL_APP_PASSWORD` | The pharmacy Gmail account and its 16-letter app password, for the owner emails |
-| `OWNER_EMAIL` | Where the daily summary and weekly alerts go (default: `GMAIL_USER`) |
-| `CRON_SECRET` | Long random string; Vercel Cron sends it so only Vercel can run the evening job |
+| `SHOP_MODE` | `1` on the shop computer (docker-compose sets it). Sales never wait for the network |
+| `CLOUD_MONGODB_URI` | Shop computer only: the Atlas connection string that **Upload to cloud** copies to |
+| `READ_ONLY` | `1` on Vercel: the online copy is for viewing; changes are made in the shop |
+| `UPLOAD_WARN_DAYS` | Warn on every page when the last upload is older than this (default `3`) |
+| `OWNER_WHATSAPP` | Owner's number for the WhatsApp summary and alerts, e.g. `26658000000` |
+| `GMAIL_USER`, `GMAIL_APP_PASSWORD`, `OWNER_EMAIL` | Optional: also allow the owner messages by email |
+| `CRON_SECRET` | Optional: protects `/api/cron/daily` if you schedule it yourself |
 | `WEEKLY_ALERT_DAY` | Day for the weekly alerts: `Mon`…`Sun` (default `Thu`, so orders go in before the weekend) |
 | `MARKUP_PERCENT` | Markup used for suggested prices and below-cost warnings (default `82`, the 45% gross margin in the business plan) |
 | `SECRET_KEY` | Long random string; the app refuses to start without it |
@@ -76,7 +80,7 @@ pip install mongomock
 python tests/run_all.py
 ```
 
-24 suites, 1,764 checks, run against an in-memory database. `tests/test_pos.py` covers the till, receipts, voids, cash-up and the public feed.
+28 suites, 1,918 checks, run against an in-memory database. `tests/test_pos.py` covers the till, receipts, voids, cash-up and the public feed.
 
 ## Run it on your own computer
 
@@ -84,7 +88,7 @@ You need **Python 3.12**, **Git** and **Docker Desktop** (for the database).
 
 1. Start a local database (MongoDB) in the background:
    ```bash
-   docker compose up -d
+   docker compose up -d mongo
    ```
 2. Create a virtual environment and install the packages:
    ```bash
@@ -106,14 +110,49 @@ On a Mac, if port 5000 is taken (AirPlay Receiver uses it), set `PORT=5001` in `
 
 **With the website:** run the website too (see its README). The website reads products from this app and this app sends refill reminders to the website, so both `.env` files must point at each other and share the same `TILL_SYNC_SECRET`.
 
-**The evening job by hand** (owner emails and reminder retries):
-```bash
-curl -H "Authorization: Bearer local-cron-secret" http://localhost:5000/api/cron/daily
-```
 
 **Tests** use a fake database, so they don't need Docker: `python tests/run_all.py`.
 
 Your local data lives only in the Docker volume on your computer. `docker compose down` stops the database and keeps the data; `docker compose down -v` deletes it.
+
+## The shop computer and the online copy
+
+The pharmacy sells from **one computer in the shop** that runs the app and its own
+database in Docker. Tills, phones and laptops on the shop Wi-Fi open it, so no
+internet is needed to sell, receive or count stock.
+
+1. Install Docker Desktop and set it to start when the computer starts.
+2. `cp .env.example .env`, then fill in `SECRET_KEY`, `ADMIN_PASSWORD`,
+   `CLOUD_MONGODB_URI` (the Atlas connection string) and `OWNER_WHATSAPP`.
+3. `docker compose up -d --build`. The app is at `http://<shop computer's IP>:5000`.
+
+**Uploading.** When the computer is connected to the network, an admin opens
+**Owner Reports** and presses **Upload to cloud now**. Only records changed since
+the last upload are sent. **Full upload** checks every record, which also repairs an
+online copy that was changed by hand. Every page warns the admin when the last upload
+is older than `UPLOAD_WARN_DAYS`.
+
+**The online copy** is the Vercel deployment with `READ_ONLY=1`. It shows the shop's
+records as at the last upload, feeds the website's product list, and refuses changes.
+Changes made online would be overwritten by the next upload, which is why they are
+refused.
+
+**Backups.** Until the next upload, the shop computer holds the only copy of the
+latest sales. Upload at least every few days, and download a backup from `/backup` regularly.
+
+## WhatsApp messages
+
+Messages are written by the app and sent by a person: each button opens WhatsApp
+with the text filled in, and someone presses Send. No Meta account, approval or
+fees are needed.
+
+- **Owner Reports → Send on WhatsApp**: today's summary, and the weekly alerts
+  (best on `WEEKLY_ALERT_DAY`), to `OWNER_WHATSAPP`.
+- **Refill calls** (`/refills`): chronic patients due within a week or up to 60
+  days late. **WhatsApp** opens the reminder for that patient and marks it sent.
+  The message never names the medicine. Patients without a number are phoned.
+
+Local numbers (8 digits) get Lesotho's code, 266, added.
 
 ## Retail features
 

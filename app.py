@@ -591,6 +591,7 @@ def get_nav_links() -> str:
         <p class="nav-links"><strong>Navigate:</strong>
             <a href="/sell">Point of Sale</a> |
             <a href="/sales">Sales</a> |
+            <a href="/refills">Refill calls</a> |
             <a href="/dashboard">Dashboard</a> |
             <a href="/receive">Receiving</a> |
             <a href="/write-off">Write-offs</a> |
@@ -602,7 +603,7 @@ def get_nav_links() -> str:
             {audit_link}
             <span>Welcome, {name}! <a href="/logout">Logout</a></span>
         </p>
-        """ + SESSION_GUARD_JS.replace('__TIMEOUT__', str(SESSION_TIMEOUT_MINUTES))
+        """ + upload_banner(is_admin) + SESSION_GUARD_JS.replace('__TIMEOUT__', str(SESSION_TIMEOUT_MINUTES))
     else:
         return """
         <p class="nav-links"><strong>Navigate:</strong>
@@ -1041,6 +1042,15 @@ def _reminder_for_sale(wanted: bool, name: str, email: str, phone: str,
             'status': 'pending', 'attempts': 0}
 
 
+def _reminder_saved_note(sale: Doc) -> str:
+    """In the shop the sale does not wait for the network: the patient goes on
+    the Refill calls list, and the website hears about it at the next upload."""
+    rem = sale.get('reminder') or {}
+    due = (datetime.strptime(rem['sold_on'], '%Y-%m-%d')
+           + timedelta(days=rem['days_supply'])).strftime('%d %b %Y')
+    return f'Refill reminder set for {due}; the patient will appear on Refill calls a week before.'
+
+
 def _push_reminder(db: Any, sale: Doc) -> str:
     """Send a sale's refill reminder to the website. Returns a note for the cashier.
 
@@ -1266,7 +1276,7 @@ def sell() -> ResponseReturnValue:
         note = ''
         sale_doc = db['sales'].find_one({'receipt_no': receipt_no})
         if sale_doc and sale_doc.get('reminder'):
-            note = ' ' + _push_reminder(db, sale_doc)
+            note = ' ' + (_reminder_saved_note(sale_doc) if SHOP_MODE else _push_reminder(db, sale_doc))
         elif wants_reminder:
             note = (' No refill reminder: nothing in this sale is marked chronic, or it lasts '
                     f'less than {REMINDER_MIN_DAYS} days.')
@@ -8367,7 +8377,8 @@ def daily_summary(db: Any, day: date) -> Doc:
         'location', {'date': {'$gte': datetime(day.year, day.month, day.day) - timedelta(days=30)}}))
     missing_temps = [f'{loc} ({sess})' for loc in TEMP_LOCATIONS if loc in in_use
                      for sess in TEMP_SESSIONS if (loc, sess) not in logged]
-    pending_reminders = db['sales'].count_documents({'reminder.status': 'pending'})
+    pending_reminders = (db['sales'].count_documents({'reminder.status': 'pending'})
+                         if website_linked() else 0)
     return {'day': day, 'count': count, 'total': total, 'cost': cost, 'profit': total - cost,
             'by_method': sorted(by_method.items(), key=lambda kv: -kv[1]['total']),
             'voids': voids, 'writeoffs': writeoffs, 'late_today': late_today, 'awaiting': awaiting,
@@ -8529,6 +8540,8 @@ def cron_daily() -> ResponseReturnValue:
     and on WEEKLY_ALERT_DAY the weekly alerts too."""
     if not _cron_authorised():
         return jsonify({'error': 'unauthorised'}), 401
+    if READ_ONLY:
+        return jsonify({'skipped': 'online copy is view-only; messages go from the shop'})
     db = get_mongo_client()[DB_NAME]
     today = local_now().date()
     retried = retry_pending_reminders(db)
@@ -8558,6 +8571,25 @@ def owner_reports() -> ResponseReturnValue:
             n = retry_pending_reminders(db)
             flash(f'{n} pending refill reminder(s) reached the website.', 'success')
             return redirect(url_for('owner_reports'))
+        elif which == 'upload':
+            who = session['user'].get('name') or session['user'].get('login')
+            try:
+                done = upload_to_cloud(db, who, full=bool(request.form.get('full')))
+            except Exception as e:
+                app.logger.warning(f'upload failed: {e}')
+                db['sync_log'].insert_one({'at': datetime.utcnow(), 'by': who, 'ok': False,
+                                           'error': str(e)[:300]})
+                flash('Upload failed: check that this computer is connected to the internet, '
+                      f'then try again. ({str(e)[:120]})', 'error')
+                return redirect(url_for('owner_reports'))
+            write_audit_entry('UPDATE', 'cloud_copy', 'upload',
+                              f"{done['sent']} record(s) sent, {done['removed']} removed")
+            extra = ''
+            if website_linked():
+                extra = f' {retry_pending_reminders(db)} refill reminder(s) passed to the website.'
+            flash(f"Uploaded: {done['sent']} changed record(s) sent, {done['removed']} removed."
+                  + extra + ' Now send today\'s summary on WhatsApp below.', 'success')
+            return redirect(url_for('owner_reports'))
         else:
             ok = False
         to = owner_email_address()
@@ -8566,12 +8598,320 @@ def owner_reports() -> ResponseReturnValue:
               'go elsewhere), then check the app password.', 'success' if ok else 'error')
         return redirect(url_for('owner_reports'))
     message_class, message = _flashed_banner()
+    daily, weekly = daily_summary(db, today), weekly_alerts(db, today)
+    owner_wa = os.getenv('OWNER_WHATSAPP') or ''
     return render_template('owner_reports.html', nav_links=get_nav_links(),
                            message=message, message_class=message_class,
-                           daily=daily_summary(db, today), weekly=weekly_alerts(db, today),
+                           daily=daily, weekly=weekly,
+                           wa_daily=wa_link(owner_wa, whatsapp_daily_text(daily)),
+                           wa_weekly=wa_link(owner_wa, whatsapp_weekly_text(weekly, today)),
+                           owner_whatsapp=wa_number(owner_wa), email_on=bool(_gmail()),
+                           can_upload=cloud_configured() and not READ_ONLY,
+                           read_only=READ_ONLY, upload=upload_status(db),
                            suppliers=supplier_prices(db), owner_email=owner_email_address(),
                            markup_percent=MARKUP_PERCENT, pct=_pct,
                            weekly_day=(os.getenv('WEEKLY_ALERT_DAY') or 'Thu')[:3].title())
+
+
+# ---------------------------------------------------------------------------
+# Offline shop, online copy, and WhatsApp
+#
+# In the shop the app runs on one computer (Docker) with its own database,
+# so selling never needs the internet. SHOP_MODE=1 marks that copy. When
+# someone connects to the network they press "Upload to cloud" on Owner
+# Reports, which copies the shop database to CLOUD_MONGODB_URI. Only the
+# records that changed since the last upload are sent: a fingerprint of each
+# record is kept in the shop's sync_hashes collection.
+#
+# The online copy (Vercel) runs with READ_ONLY=1: it is for viewing and
+# for the website's product feed. One place changes the data, so the two
+# copies can never disagree.
+#
+# Messages go by WhatsApp. The app writes the message and a button opens
+# WhatsApp with it filled in; a person presses Send. Nothing needs Meta's
+# approval and nothing is paid for.
+# ---------------------------------------------------------------------------
+import hashlib
+import bson
+from bson import json_util
+from pymongo import ReplaceOne
+from urllib.parse import quote as _url_quote
+
+
+def _env_flag(name: str) -> bool:
+    return (os.getenv(name) or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+SHOP_MODE = _env_flag('SHOP_MODE')
+READ_ONLY = _env_flag('READ_ONLY')
+try:
+    UPLOAD_WARN_DAYS = max(1, int(os.getenv('UPLOAD_WARN_DAYS') or 3))
+except ValueError:
+    UPLOAD_WARN_DAYS = 3
+SYNC_HASHES = 'sync_hashes'        # the shop's own bookkeeping: never uploaded
+UPLOAD_BATCH = 500
+REFILL_LIST_AHEAD_DAYS = 7         # show patients due within the next week
+REFILL_LIST_BACK_DAYS = 60         # and those up to two months late
+LESOTHO_CODE = '266'
+
+# What the online copy still lets people do.
+READ_ONLY_ALLOWED = {'login', 'logout', 'static', 'session_ping', 'reports'}
+
+
+def cloud_configured() -> bool:
+    return bool((os.getenv('CLOUD_MONGODB_URI') or '').strip())
+
+
+def _cloud_db() -> Any:
+    uri = (os.getenv('CLOUD_MONGODB_URI') or '').strip()
+    if not uri:
+        return None
+    if uri == (os.getenv('MONGODB_URI') or '').strip():
+        raise RuntimeError('CLOUD_MONGODB_URI is the same database as MONGODB_URI.')
+    return MongoClient(uri, serverSelectionTimeoutMS=15000)[DB_NAME]
+
+
+def last_upload(db: Any) -> Doc | None:
+    return db['sync_log'].find_one({'ok': True}, sort=[('at', -1)])
+
+
+def _doc_key(collection: str, _id: Any) -> str:
+    return f'{collection}|{json_util.dumps(_id)}'
+
+
+def upload_to_cloud(db: Any, by: str, full: bool = False) -> Doc:
+    """Copy the shop database to the online copy. Returns what was sent.
+
+    full=True ignores the fingerprints and checks every record, which also
+    repairs an online copy that was changed or emptied by hand.
+    """
+    cloud = _cloud_db()
+    if cloud is None:
+        raise RuntimeError('CLOUD_MONGODB_URI is not set on this computer.')
+    known = {} if full else {h['_id']: h['h'] for h in db[SYNC_HASHES].find()}
+    seen: dict[str, str] = {}
+    changed: dict[str, str] = {}
+    sent = removed = 0
+    per_collection: dict[str, int] = {}
+    for name in sorted(db.list_collection_names()):
+        if name == SYNC_HASHES or name.startswith('system.'):
+            continue
+        ops, n, local_ids = [], 0, set()
+        for doc in db[name].find():
+            key = _doc_key(name, doc['_id'])
+            fingerprint = hashlib.sha1(bson.encode(doc)).hexdigest()
+            seen[key] = fingerprint
+            local_ids.add(key)
+            if known.get(key) == fingerprint:
+                continue
+            ops.append(ReplaceOne({'_id': doc['_id']}, doc, upsert=True))
+            changed[key] = fingerprint
+            n += 1
+            if len(ops) >= UPLOAD_BATCH:
+                cloud[name].bulk_write(ops, ordered=False)
+                ops = []
+        if ops:
+            cloud[name].bulk_write(ops, ordered=False)
+        if full:
+            stale = [c['_id'] for c in cloud[name].find({}, {'_id': 1})
+                     if _doc_key(name, c['_id']) not in local_ids]
+            for i in range(0, len(stale), UPLOAD_BATCH):
+                cloud[name].delete_many({'_id': {'$in': stale[i:i + UPLOAD_BATCH]}})
+            removed += len(stale)
+        if n:
+            per_collection[name] = n
+        sent += n
+    if not full:
+        # Records deleted in the shop since the last upload.
+        gone = [k for k in known if k not in seen]
+        for key in gone:
+            name, raw = key.split('|', 1)
+            cloud[name].delete_one({'_id': json_util.loads(raw)})
+        removed += len(gone)
+        if gone:
+            db[SYNC_HASHES].delete_many({'_id': {'$in': gone}})
+    else:
+        db[SYNC_HASHES].delete_many({})
+    # Fingerprints are saved only after the online copy accepted the records,
+    # so an upload cut off half way simply sends them again next time.
+    hash_ops = [ReplaceOne({'_id': k}, {'_id': k, 'h': h}, upsert=True)
+                for k, h in (seen if full else changed).items()]
+    for i in range(0, len(hash_ops), UPLOAD_BATCH):
+        db[SYNC_HASHES].bulk_write(hash_ops[i:i + UPLOAD_BATCH], ordered=False)
+    entry = {'at': datetime.utcnow(), 'by': by, 'ok': True, 'full': full,
+             'sent': sent, 'removed': removed, 'collections': per_collection}
+    entry['_id'] = db['sync_log'].insert_one(dict(entry)).inserted_id
+    # The online copy learns the time of this upload at once, not next time.
+    cloud['sync_log'].replace_one({'_id': entry['_id']}, entry, upsert=True)
+    db[SYNC_HASHES].replace_one(
+        {'_id': _doc_key('sync_log', entry['_id'])},
+        {'_id': _doc_key('sync_log', entry['_id']),
+         'h': hashlib.sha1(bson.encode(db['sync_log'].find_one({'_id': entry['_id']}))).hexdigest()},
+        upsert=True)
+    return entry
+
+
+def upload_status(db: Any) -> Doc:
+    last = last_upload(db)
+    days = None
+    if last:
+        days = (datetime.utcnow() - last['at']).days
+    return {'last': last, 'when': to_local(last['at'], '%d %b %Y %H:%M') if last else None,
+            'days': days, 'stale': last is None or days >= UPLOAD_WARN_DAYS}
+
+
+def upload_banner(is_admin: bool) -> str:
+    """A line above every page: on the online copy always, in the shop when overdue."""
+    if not (READ_ONLY or (SHOP_MODE and is_admin and cloud_configured())):
+        return ''
+    try:
+        st = upload_status(get_mongo_client()[DB_NAME])
+    except Exception as e:
+        app.logger.warning(f'upload status unavailable: {e}')
+        return ''
+    if READ_ONLY:
+        when = st['when'] or 'never'
+        return (f'<p class="message partial">This is the online copy, for viewing only. '
+                f'Last uploaded from the shop: {escape(when)}. Make changes in the shop.</p>')
+    if st['stale']:
+        age = ('has never been uploaded' if st['last'] is None
+               else f"was last uploaded {st['days']} day(s) ago")
+        return (f'<p class="message partial">The online copy {age}. Connect to the network and '
+                f'press <a href="/owner-reports">Upload to cloud</a> on Owner Reports.</p>')
+    return ''
+
+
+@app.before_request
+def _online_copy_is_read_only() -> ResponseReturnValue | None:
+    if not READ_ONLY or request.method in ('GET', 'HEAD', 'OPTIONS'):
+        return None
+    if request.endpoint in READ_ONLY_ALLOWED:
+        return None
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'This is the online copy, for viewing only.'}), 403
+    return render_template('read_only.html', back=request.referrer or '/dashboard'), 403
+
+
+def website_linked() -> bool:
+    return bool((os.getenv('WEBSITE_URL') or '').strip() and os.getenv('TILL_SYNC_SECRET'))
+
+
+def wa_number(phone: str | None) -> str:
+    """A phone number in the form WhatsApp links need: country code, digits only."""
+    digits = re.sub(r'\D', '', phone or '')
+    if digits.startswith('00'):
+        digits = digits[2:]
+    if len(digits) == 8:                      # a local Lesotho number
+        digits = LESOTHO_CODE + digits
+    return digits if 10 <= len(digits) <= 15 else ''
+
+
+def wa_link(phone: str | None, text: str) -> str:
+    """Opens WhatsApp with the message filled in. No number: WhatsApp asks who to send to."""
+    n = wa_number(phone)
+    return f'https://wa.me/{n}?text={_url_quote(text)}' if n else f'https://wa.me/?text={_url_quote(text)}'
+
+
+def _shorten(items: list[str], limit: int = 10) -> list[str]:
+    return items[:limit] + ([f'…and {len(items) - limit} more'] if len(items) > limit else [])
+
+
+def whatsapp_daily_text(d: Doc) -> str:
+    subject, text, _ = render_daily_email(d)
+    return f'*{subject}*\n\n' + text.split('\n', 2)[2]
+
+
+def whatsapp_weekly_text(w: Doc, today: date) -> str:
+    a = w['adherence']
+    parts = [f'*Healing Hub weekly alerts, {today:%d %b %Y}*', '',
+             f"Refills on time: {a['on_time']} of {a['due']} ({_pct(a['rate'])}); "
+             f"late {a['late']}, missed {a['missed']}."]
+    sections = [
+        ('Running low', [f"{r['name']}: {r['balance']} left, ~{r['weeks']} wk" for r in w['reorder']]),
+        (f'Expiring within {EXPIRY_WARN_DAYS} days',
+         [f"{e['name']}: {e['balance']} units, {e['expiry']}" + (' (EXPIRED)' if e['expired'] else '')
+          for e in w['expiring']]),
+        ('Priced below cost', [f"{b['name']}: M{b['selling_price']:.2f} vs cost M{b['cost']:.2f}"
+                               for b in w['below_cost']]),
+        ('Asked for but out of stock', [f'{n}: {_num(q)}' for n, q in w['unmet']]),
+    ]
+    for title, items in sections:
+        parts += ['', f'*{title}* ({len(items)})'] + ([f'- {x}' for x in _shorten(items)] or ['- none'])
+    return '\n'.join(parts)
+
+
+def refill_message(name: str | None, due: date, days_left: int) -> str:
+    """The WhatsApp text for one patient. It never names the medicine."""
+    first = (name or '').strip().split(' ')[0] if (name or '').strip() else ''
+    hello = f'Dumela {first}' if first else 'Dumela'
+    when = due.strftime('%d %B')
+    if days_left >= 0:
+        body = f'your next refill is due on {when}. We will have it ready for you.'
+    else:
+        body = f'your refill was due on {when}. Please come in when you can, so that you do not run out.'
+    return (f'{hello}, this is The Healing Hub Pharmacy in Ha Leqele. A friendly reminder that {body} '
+            'If you have any questions, just reply to this message.')
+
+
+def refill_call_list(db: Any, today: date) -> list[Doc]:
+    """Chronic patients due within a week or up to two months late, most late first.
+
+    Only each patient's latest purchase counts: someone who has already come
+    back is not on the list.
+    """
+    since = (today - timedelta(days=REMINDER_MAX_DAYS + REFILL_LIST_BACK_DAYS + 30)).strftime('%Y-%m-%d')
+    latest: dict[str, Doc] = {}
+    for s in db['sales'].find({'reminder.sold_on': {'$gte': since}, 'status': {'$ne': 'voided'}},
+                              {'receipt_no': 1, 'reminder': 1}):
+        key = _patient_key(s['reminder']) or ('r:' + s['receipt_no'])
+        if key not in latest or s['reminder']['sold_on'] > latest[key]['reminder']['sold_on']:
+            latest[key] = s
+    rows = []
+    for s in latest.values():
+        r = s['reminder']
+        due = datetime.strptime(r['sold_on'], '%Y-%m-%d').date() + timedelta(days=r['days_supply'])
+        days_left = (due - today).days
+        if days_left > REFILL_LIST_AHEAD_DAYS or days_left < -REFILL_LIST_BACK_DAYS:
+            continue
+        rows.append({'receipt_no': s['receipt_no'], 'name': r.get('name') or '',
+                     'phone': r.get('phone') or '', 'email': r.get('email') or '',
+                     'has_whatsapp': bool(wa_number(r.get('phone'))),
+                     'due': due.strftime('%d %b %Y'), 'days_left': days_left,
+                     'messaged': to_local(r['whatsapp_at'], '%d %b %H:%M') if r.get('whatsapp_at') else '',
+                     'messaged_by': r.get('whatsapp_by') or ''})
+    rows.sort(key=lambda x: x['days_left'])
+    return rows
+
+
+@app.route('/refills', methods=['GET'])
+@login_required
+def refills() -> ResponseReturnValue:
+    db = get_mongo_client()[DB_NAME]
+    message_class, message = _flashed_banner()
+    return render_template('refills.html', nav_links=get_nav_links(), message=message,
+                           message_class=message_class,
+                           rows=refill_call_list(db, local_now().date()),
+                           ahead=REFILL_LIST_AHEAD_DAYS, back=REFILL_LIST_BACK_DAYS)
+
+
+@app.route('/refills/whatsapp', methods=['POST'])
+@login_required
+def refill_whatsapp() -> ResponseReturnValue:
+    """Record that the patient was messaged, then open WhatsApp with the message."""
+    db = get_mongo_client()[DB_NAME]
+    receipt_no = (request.form.get('receipt_no') or '').strip()
+    sale = db['sales'].find_one({'receipt_no': receipt_no, 'reminder': {'$ne': None}})
+    if not sale or not wa_number(sale['reminder'].get('phone')):
+        flash('No WhatsApp number for that patient. Phone them instead.', 'error')
+        return redirect(url_for('refills'))
+    r = sale['reminder']
+    due = datetime.strptime(r['sold_on'], '%Y-%m-%d').date() + timedelta(days=r['days_supply'])
+    text = refill_message(r.get('name'), due, (due - local_now().date()).days)
+    who = session['user'].get('name') or session['user'].get('login')
+    db['sales'].update_one({'_id': sale['_id']},
+                           {'$set': {'reminder.whatsapp_at': datetime.utcnow(), 'reminder.whatsapp_by': who}})
+    write_audit_entry('UPDATE', 'sale', receipt_no, f'refill reminder sent on WhatsApp by {who}')
+    return redirect(wa_link(r.get('phone'), text))
 
 
 # FIX (Bug, regression): init_audit() must run at module level, not inside
