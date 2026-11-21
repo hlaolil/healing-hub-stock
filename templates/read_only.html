@@ -1,11 +1,16 @@
 {% extends "base.html" %}
 {% block title %}View Only &middot; The Healing Hub Pharmacy{% endblock %}
-{% block heading %}This is the online copy, for viewing only{% endblock %}
+{% block heading %}This copy is view-only right now{% endblock %}
 {% block nav %}{% endblock %}
 {% block content %}
 <p class="message partial">Nothing was saved and nothing was changed.</p>
-<p>The pharmacy's records are kept on the computer in the shop. Make the change there,
-then upload, and it will appear here too. A change made here would be overwritten at the
-next upload, which is why it is refused.</p>
+{% if shop %}
+<p>Online is in charge at the moment. Connect this computer to the network and press
+<strong>Bring back to shop</strong> on Owner Reports; then the shop can make changes again.</p>
+{% else %}
+<p>The shop is in charge at the moment. Make the change there, or ask for the records to be
+handed over to online (Owner Reports in the shop: <strong>Upload and hand over to online</strong>).</p>
+{% endif %}
+<p>Only one copy accepts changes at a time, so the shop and online never disagree.</p>
 <p><a href="{{ back }}">Go back</a></p>
 {% endblock %}

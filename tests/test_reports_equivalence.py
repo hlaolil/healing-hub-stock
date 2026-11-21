@@ -282,8 +282,10 @@ for n in (10, 100, 320):
     print(f'   {n:>3} medications -> inventory: {inv} queries, stock on hand: {soh} queries')
     # 7: the period's movement, unmet demand, and the movement since the
     # period (to give the balance as it stood then), plus the item list.
+    # +2: the page banner's single read of who is in charge (shop or online);
+    # mongomock counts a find_one as a find_one plus a find.
     _inv_counts.append(inv)
-    check(f'inventory stays flat at {n} medications (was {2 * n + 1})', inv <= 7, str(inv))
+    check(f'inventory stays flat at {n} medications (was {2 * n + 1})', inv <= 9, str(inv))
     check(f'stock on hand stays flat at {n} medications (was {2 * n + 1})', soh <= 5, str(soh))
 check('the inventory count is the same at every size',
       len(set(_inv_counts)) == 1, str(_inv_counts))

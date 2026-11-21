@@ -8540,8 +8540,8 @@ def cron_daily() -> ResponseReturnValue:
     and on WEEKLY_ALERT_DAY the weekly alerts too."""
     if not _cron_authorised():
         return jsonify({'error': 'unauthorised'}), 401
-    if READ_ONLY:
-        return jsonify({'skipped': 'online copy is view-only; messages go from the shop'})
+    if read_only_now():
+        return jsonify({'skipped': 'this copy is view-only right now'})
     db = get_mongo_client()[DB_NAME]
     today = local_now().date()
     retried = retry_pending_reminders(db)
@@ -8568,27 +8568,55 @@ def owner_reports() -> ResponseReturnValue:
         elif which == 'weekly':
             ok = send_owner_email(*render_weekly_email(weekly_alerts(db, today), today))
         elif which == 'retry':
+            if read_only_now():
+                flash('This copy is view-only right now.', 'error')
+                return redirect(url_for('owner_reports'))
             n = retry_pending_reminders(db)
             flash(f'{n} pending refill reminder(s) reached the website.', 'success')
             return redirect(url_for('owner_reports'))
-        elif which == 'upload':
+        elif which in ('upload', 'handover', 'takeback'):
             who = session['user'].get('name') or session['user'].get('login')
+            if not (SHOP_MODE and cloud_configured()):
+                flash('Syncing is done from the shop computer.', 'error')
+                return redirect(url_for('owner_reports'))
+            hand_to = 'online' if which == 'handover' else 'shop'
             try:
-                done = upload_to_cloud(db, who, full=bool(request.form.get('full')))
+                done = sync_with_cloud(db, who, hand_to=hand_to,
+                                       full=which == 'upload' and bool(request.form.get('full')))
             except Exception as e:
-                app.logger.warning(f'upload failed: {e}')
+                app.logger.warning(f'sync failed: {e}')
                 db['sync_log'].insert_one({'at': datetime.utcnow(), 'by': who, 'ok': False,
                                            'error': str(e)[:300]})
-                flash('Upload failed: check that this computer is connected to the internet, '
-                      f'then try again. ({str(e)[:120]})', 'error')
+                flash('Sync failed, and nothing changed hands: check that this computer is '
+                      f'connected to the internet, then try again. ({str(e)[:120]})', 'error')
                 return redirect(url_for('owner_reports'))
-            write_audit_entry('UPDATE', 'cloud_copy', 'upload',
-                              f"{done['sent']} record(s) sent, {done['removed']} removed")
+            write_audit_entry('UPDATE', 'cloud_copy', which,
+                              f"{done['sent']} sent, {done['received']} received, "
+                              f"{done['removed']} removed, {done['conflict_count']} conflict(s); "
+                              f"{done['hand_to']} in charge")
             extra = ''
-            if website_linked():
+            if hand_to == 'shop' and website_linked():
                 extra = f' {retry_pending_reminders(db)} refill reminder(s) passed to the website.'
-            flash(f"Uploaded: {done['sent']} changed record(s) sent, {done['removed']} removed."
-                  + extra + ' Now send today\'s summary on WhatsApp below.', 'success')
+            head = {'upload': 'Uploaded', 'handover': 'Handed over to online',
+                    'takeback': 'Back in the shop'}[which]
+            msg = (f"{head}: {done['sent']} record(s) sent, {done['received']} received, "
+                   f"{done['removed']} removed." + extra)
+            if done['conflict_count']:
+                msg += (f" {done['conflict_count']} record(s) were changed both here and online; "
+                        "the shop's version was kept. Check them below.")
+            elif which == 'handover':
+                msg += ' This shop copy is now view-only. Work online, then press Bring back to shop.'
+            flash(msg, 'partial' if done['conflict_count'] else 'success')
+            return redirect(url_for('owner_reports'))
+        elif which == 'emergency':
+            who = session['user'].get('name') or session['user'].get('login')
+            if not request.form.get('confirm'):
+                flash('Tick the box to confirm the emergency take-over.', 'error')
+                return redirect(url_for('owner_reports'))
+            emergency_take_control(db, who)
+            write_audit_entry('UPDATE', 'cloud_copy', 'emergency', f'{this_side()} took charge without a sync')
+            flash(f'The {this_side()} copy is in charge now. Sync from the shop as soon as the network '
+                  'allows; anything changed in both places will be listed then.', 'partial')
             return redirect(url_for('owner_reports'))
         else:
             ok = False
@@ -8606,8 +8634,8 @@ def owner_reports() -> ResponseReturnValue:
                            wa_daily=wa_link(owner_wa, whatsapp_daily_text(daily)),
                            wa_weekly=wa_link(owner_wa, whatsapp_weekly_text(weekly, today)),
                            owner_whatsapp=wa_number(owner_wa), email_on=bool(_gmail()),
-                           can_upload=cloud_configured() and not READ_ONLY,
-                           read_only=READ_ONLY, upload=upload_status(db),
+                           in_shop=SHOP_MODE and cloud_configured(), side=this_side(),
+                           read_only=read_only_now(), upload=upload_status(db),
                            suppliers=supplier_prices(db), owner_email=owner_email_address(),
                            markup_percent=MARKUP_PERCENT, pct=_pct,
                            weekly_day=(os.getenv('WEEKLY_ALERT_DAY') or 'Thu')[:3].title())
@@ -8617,15 +8645,18 @@ def owner_reports() -> ResponseReturnValue:
 # Offline shop, online copy, and WhatsApp
 #
 # In the shop the app runs on one computer (Docker) with its own database,
-# so selling never needs the internet. SHOP_MODE=1 marks that copy. When
-# someone connects to the network they press "Upload to cloud" on Owner
-# Reports, which copies the shop database to CLOUD_MONGODB_URI. Only the
-# records that changed since the last upload are sent: a fingerprint of each
-# record is kept in the shop's sync_hashes collection.
+# so selling never needs the internet. SHOP_MODE=1 marks that copy; the
+# online copy is the Vercel deployment on CLOUD_MONGODB_URI.
 #
-# The online copy (Vercel) runs with READ_ONLY=1: it is for viewing and
-# for the website's product feed. One place changes the data, so the two
-# copies can never disagree.
+# The two take turns. Whichever is "in charge" accepts changes; the other
+# is view-only. From the shop, when connected, Owner Reports offers:
+#   Upload                      shop changes go up, the shop stays in charge
+#   Upload and hand to online   ... and online takes charge (work away)
+#   Bring back to shop          online changes come down, the shop takes charge
+# Only records that changed since the last sync move: a fingerprint of each
+# record is kept in the shop's sync_hashes collection. If the network is down
+# when control is needed, either side can take charge in an emergency; the
+# next sync keeps the shop's version of anything changed in both and lists it.
 #
 # Messages go by WhatsApp. The app writes the message and a button opens
 # WhatsApp with it filled in; a person presses Send. Nothing needs Meta's
@@ -8648,14 +8679,18 @@ try:
     UPLOAD_WARN_DAYS = max(1, int(os.getenv('UPLOAD_WARN_DAYS') or 3))
 except ValueError:
     UPLOAD_WARN_DAYS = 3
-SYNC_HASHES = 'sync_hashes'        # the shop's own bookkeeping: never uploaded
+SYNC_HASHES = 'sync_hashes'        # the shop's own bookkeeping: never copied
+SYNC_CONTROL = 'sync_control'      # who is in charge, kept separately on each side
+NOT_COPIED = {SYNC_HASHES, SYNC_CONTROL}
+# Records here are only ever added, so a sync fetches just the new ones.
+APPEND_ONLY = {'audit_log', 'error_logs', 'app_warnings', 'sync_log'}
 UPLOAD_BATCH = 500
 REFILL_LIST_AHEAD_DAYS = 7         # show patients due within the next week
 REFILL_LIST_BACK_DAYS = 60         # and those up to two months late
 LESOTHO_CODE = '266'
 
 # What the online copy still lets people do.
-READ_ONLY_ALLOWED = {'login', 'logout', 'static', 'session_ping', 'reports'}
+READ_ONLY_ALLOWED = {'login', 'logout', 'static', 'session_ping', 'reports', 'owner_reports'}
 
 
 def cloud_configured() -> bool:
@@ -8679,117 +8714,271 @@ def _doc_key(collection: str, _id: Any) -> str:
     return f'{collection}|{json_util.dumps(_id)}'
 
 
-def upload_to_cloud(db: Any, by: str, full: bool = False) -> Doc:
-    """Copy the shop database to the online copy. Returns what was sent.
+def _fp(doc: Doc) -> str:
+    return hashlib.sha1(bson.encode(doc)).hexdigest()
 
-    full=True ignores the fingerprints and checks every record, which also
-    repairs an online copy that was changed or emptied by hand.
+
+def _doc_label(collection: str, doc: Doc | None, key: str) -> str:
+    doc = doc or {}
+    what = (doc.get('name') or doc.get('receipt_no') or doc.get('med_name')
+            or doc.get('login') or key.split('|', 1)[1])
+    return f'{collection}: {what}'
+
+
+# Who is in charge. Each database keeps a note of which copy may change the
+# records: 'shop' or 'online'. The other copy is view-only until a sync hands
+# control over. Taking turns means the two copies never both change.
+def this_side() -> str:
+    return 'shop' if SHOP_MODE else 'online'
+
+
+def get_baton(d: Any) -> Doc | None:
+    return d[SYNC_CONTROL].find_one({'_id': 'baton'})
+
+
+def _this_copy_baton() -> Doc | None:
+    """This copy's baton, read once per request: every page shows it."""
+    from flask import g, has_app_context
+    if not has_app_context():
+        return get_baton(get_mongo_client()[DB_NAME])
+    if 'baton' not in g:
+        g.baton = get_baton(get_mongo_client()[DB_NAME])
+    return g.baton
+
+
+def baton_holder(d: Any) -> str | None:
+    b = get_baton(d)
+    return b.get('holder') if b else None
+
+
+def set_baton(d: Any, holder: str, by: str, emergency: bool = False) -> None:
+    d[SYNC_CONTROL].replace_one({'_id': 'baton'},
+                                {'_id': 'baton', 'holder': holder, 'since': datetime.utcnow(),
+                                 'by': by, 'emergency': emergency}, upsert=True)
+
+
+def read_only_now() -> bool:
+    """True when this copy may not change records right now."""
+    if READ_ONLY:
+        return True
+    try:
+        b = _this_copy_baton()
+    except Exception as e:
+        app.logger.warning(f'baton unavailable: {e}')
+        return False
+    return b is not None and b.get('holder') != this_side()
+
+
+def sync_with_cloud(db: Any, by: str, hand_to: str = 'shop', full: bool = False) -> Doc:
+    """Bring the shop and the online copy level, then give control to hand_to.
+
+    Run from the shop. Changes made in the shop go up; changes made online
+    while online was in charge come down. Only records whose fingerprint
+    differs from the last sync are moved. If both copies changed the same
+    record (possible only after an emergency take-over), the shop's version
+    is kept and the record is listed so the owner can check it.
+
+    full=True sends every shop record and removes anything online that the
+    shop does not have; it is only for repairing the online copy while the
+    shop is in charge.
     """
     cloud = _cloud_db()
     if cloud is None:
         raise RuntimeError('CLOUD_MONGODB_URI is not set on this computer.')
-    known = {} if full else {h['_id']: h['h'] for h in db[SYNC_HASHES].find()}
-    seen: dict[str, str] = {}
-    changed: dict[str, str] = {}
-    sent = removed = 0
-    per_collection: dict[str, int] = {}
-    for name in sorted(db.list_collection_names()):
-        if name == SYNC_HASHES or name.startswith('system.'):
-            continue
-        ops, n, local_ids = [], 0, set()
+    if hand_to not in ('shop', 'online'):
+        raise ValueError('hand_to must be shop or online')
+    cloud_changed_possible = baton_holder(cloud) == 'online'
+    if full and cloud_changed_possible:
+        raise RuntimeError('Online is in charge: bring the records back to the shop before a full upload.')
+    known_all = {} if full else {h['_id']: h['h'] for h in db[SYNC_HASHES].find()}
+    known_by: dict[str, dict[str, str]] = defaultdict(dict)
+    for k, h in known_all.items():
+        known_by[k.split('|', 1)[0]][k] = h
+    names = set(db.list_collection_names()) | set(known_by)
+    if cloud_changed_possible:
+        names |= set(cloud.list_collection_names())
+    names = sorted(n for n in names if n not in NOT_COPIED and not n.startswith('system.'))
+
+    pushed = pulled = removed_online = removed_here = 0
+    conflicts: list[str] = []
+    new_hashes: dict[str, str] = {}
+    dropped: list[str] = []
+    for name in names:
+        known = known_by.get(name, {})
+        local_fp: dict[str, str] = {}
+        local_changed: dict[str, Doc] = {}
         for doc in db[name].find():
-            key = _doc_key(name, doc['_id'])
-            fingerprint = hashlib.sha1(bson.encode(doc)).hexdigest()
-            seen[key] = fingerprint
-            local_ids.add(key)
-            if known.get(key) == fingerprint:
+            k = _doc_key(name, doc['_id'])
+            f = _fp(doc)
+            local_fp[k] = f
+            if known.get(k) != f:
+                local_changed[k] = doc
+        local_deleted = [k for k in known if k not in local_fp]
+
+        cloud_changed: dict[str, Doc] = {}
+        cloud_deleted: list[str] = []
+        if cloud_changed_possible:
+            if name in APPEND_ONLY:
+                # Records here are only ever added: fetch just the new ones.
+                ids = [c['_id'] for c in cloud[name].find({}, {'_id': 1})]
+                new_ids = [i for i in ids if _doc_key(name, i) not in known
+                           and _doc_key(name, i) not in local_fp]
+                for i in range(0, len(new_ids), UPLOAD_BATCH):
+                    for doc in cloud[name].find({'_id': {'$in': new_ids[i:i + UPLOAD_BATCH]}}):
+                        cloud_changed[_doc_key(name, doc['_id'])] = doc
+            else:
+                seen_online = set()
+                for doc in cloud[name].find():
+                    k = _doc_key(name, doc['_id'])
+                    seen_online.add(k)
+                    if known.get(k) != _fp(doc):
+                        cloud_changed[k] = doc
+                cloud_deleted = [k for k in known if k not in seen_online]
+
+        to_push = dict(local_changed)
+        to_pull: dict[str, Doc] = {}
+        for k, doc in cloud_changed.items():
+            if k in local_changed:
+                if _fp(doc) != local_fp[k]:
+                    conflicts.append(_doc_label(name, local_changed[k], k))
+                else:
+                    to_push.pop(k)              # already the same in both
+                    new_hashes[k] = local_fp[k]
                 continue
-            ops.append(ReplaceOne({'_id': doc['_id']}, doc, upsert=True))
-            changed[key] = fingerprint
-            n += 1
-            if len(ops) >= UPLOAD_BATCH:
-                cloud[name].bulk_write(ops, ordered=False)
-                ops = []
-        if ops:
-            cloud[name].bulk_write(ops, ordered=False)
+            if k in local_deleted:
+                conflicts.append(_doc_label(name, doc, k) + ' (deleted in the shop)')
+                continue
+            to_pull[k] = doc
+        for k in cloud_deleted:
+            if k in local_changed:
+                conflicts.append(_doc_label(name, local_changed[k], k) + ' (deleted online)')
+        delete_here = [k for k in cloud_deleted if k not in local_changed]
+
+        ops = [ReplaceOne({'_id': d['_id']}, d, upsert=True) for d in to_push.values()]
+        for i in range(0, len(ops), UPLOAD_BATCH):
+            cloud[name].bulk_write(ops[i:i + UPLOAD_BATCH], ordered=False)
+        for k in local_deleted:
+            cloud[name].delete_one({'_id': json_util.loads(k.split('|', 1)[1])})
         if full:
             stale = [c['_id'] for c in cloud[name].find({}, {'_id': 1})
-                     if _doc_key(name, c['_id']) not in local_ids]
+                     if _doc_key(name, c['_id']) not in local_fp]
             for i in range(0, len(stale), UPLOAD_BATCH):
                 cloud[name].delete_many({'_id': {'$in': stale[i:i + UPLOAD_BATCH]}})
-            removed += len(stale)
-        if n:
-            per_collection[name] = n
-        sent += n
-    if not full:
-        # Records deleted in the shop since the last upload.
-        gone = [k for k in known if k not in seen]
-        for key in gone:
-            name, raw = key.split('|', 1)
-            cloud[name].delete_one({'_id': json_util.loads(raw)})
-        removed += len(gone)
-        if gone:
-            db[SYNC_HASHES].delete_many({'_id': {'$in': gone}})
-    else:
+            removed_online += len(stale)
+        ops = [ReplaceOne({'_id': d['_id']}, d, upsert=True) for d in to_pull.values()]
+        for i in range(0, len(ops), UPLOAD_BATCH):
+            db[name].bulk_write(ops[i:i + UPLOAD_BATCH], ordered=False)
+        for k in delete_here:
+            db[name].delete_one({'_id': json_util.loads(k.split('|', 1)[1])})
+
+        for k in to_push:
+            new_hashes[k] = local_fp[k]
+        for k, d in to_pull.items():
+            new_hashes[k] = _fp(d)
+        dropped += [k for k in local_deleted + delete_here if k not in new_hashes]
+        pushed += len(to_push)
+        pulled += len(to_pull)
+        removed_online += len(local_deleted)
+        removed_here += len(delete_here)
+
+    # Fingerprints are saved only after both copies took the records, so a
+    # sync cut off half way simply moves them again next time.
+    if full:
         db[SYNC_HASHES].delete_many({})
-    # Fingerprints are saved only after the online copy accepted the records,
-    # so an upload cut off half way simply sends them again next time.
-    hash_ops = [ReplaceOne({'_id': k}, {'_id': k, 'h': h}, upsert=True)
-                for k, h in (seen if full else changed).items()]
+    if dropped:
+        for i in range(0, len(dropped), UPLOAD_BATCH):
+            db[SYNC_HASHES].delete_many({'_id': {'$in': dropped[i:i + UPLOAD_BATCH]}})
+    hash_ops = [ReplaceOne({'_id': k}, {'_id': k, 'h': h}, upsert=True) for k, h in new_hashes.items()]
     for i in range(0, len(hash_ops), UPLOAD_BATCH):
         db[SYNC_HASHES].bulk_write(hash_ops[i:i + UPLOAD_BATCH], ordered=False)
-    entry = {'at': datetime.utcnow(), 'by': by, 'ok': True, 'full': full,
-             'sent': sent, 'removed': removed, 'collections': per_collection}
+
+    # Online first: if the line drops now, the shop still believes online is
+    # in charge (or the shop is), and the next sync puts it right.
+    set_baton(cloud, hand_to, by)
+    set_baton(db, hand_to, by)
+    entry = {'at': datetime.utcnow(), 'by': by, 'ok': True, 'full': full, 'hand_to': hand_to,
+             'sent': pushed, 'received': pulled, 'removed': removed_online + removed_here,
+             'conflicts': conflicts[:50], 'conflict_count': len(conflicts)}
     entry['_id'] = db['sync_log'].insert_one(dict(entry)).inserted_id
-    # The online copy learns the time of this upload at once, not next time.
     cloud['sync_log'].replace_one({'_id': entry['_id']}, entry, upsert=True)
-    db[SYNC_HASHES].replace_one(
-        {'_id': _doc_key('sync_log', entry['_id'])},
-        {'_id': _doc_key('sync_log', entry['_id']),
-         'h': hashlib.sha1(bson.encode(db['sync_log'].find_one({'_id': entry['_id']}))).hexdigest()},
-        upsert=True)
+    k = _doc_key('sync_log', entry['_id'])
+    db[SYNC_HASHES].replace_one({'_id': k}, {'_id': k, 'h': _fp(db['sync_log'].find_one({'_id': entry['_id']}))},
+                                upsert=True)
     return entry
+
+
+def upload_to_cloud(db: Any, by: str, full: bool = False) -> Doc:
+    """Send the shop's changes up; the shop stays in charge."""
+    return sync_with_cloud(db, by, hand_to='shop', full=full)
+
+
+def emergency_take_control(db: Any, by: str) -> None:
+    """Take charge without the network, e.g. the shop when the line is down,
+    or online when the shop computer is broken. The next sync from the shop
+    brings both copies level and lists any record changed in both."""
+    set_baton(db, this_side(), by, emergency=True)
+    db['sync_log'].insert_one({'at': datetime.utcnow(), 'by': by, 'ok': False,
+                               'emergency': this_side()})
 
 
 def upload_status(db: Any) -> Doc:
     last = last_upload(db)
-    days = None
-    if last:
-        days = (datetime.utcnow() - last['at']).days
+    days = (datetime.utcnow() - last['at']).days if last else None
+    b = get_baton(db)
     return {'last': last, 'when': to_local(last['at'], '%d %b %Y %H:%M') if last else None,
-            'days': days, 'stale': last is None or days >= UPLOAD_WARN_DAYS}
+            'days': days, 'stale': last is None or days >= UPLOAD_WARN_DAYS,
+            'holder': (b or {}).get('holder') or ('shop' if SHOP_MODE else None),
+            'since': to_local(b['since'], '%d %b %Y %H:%M') if b else None,
+            'by': (b or {}).get('by'), 'emergency': bool((b or {}).get('emergency'))}
 
 
 def upload_banner(is_admin: bool) -> str:
-    """A line above every page: on the online copy always, in the shop when overdue."""
-    if not (READ_ONLY or (SHOP_MODE and is_admin and cloud_configured())):
-        return ''
+    """A line above every page saying who is in charge, and when a sync is due."""
+    if not (READ_ONLY or SHOP_MODE or cloud_configured()):
+        try:
+            if _this_copy_baton() is None:
+                return ''           # an online app with no shop: nothing to say
+        except Exception:
+            return ''
     try:
         st = upload_status(get_mongo_client()[DB_NAME])
     except Exception as e:
         app.logger.warning(f'upload status unavailable: {e}')
         return ''
+    when = escape(st['when'] or 'never')
     if READ_ONLY:
-        when = st['when'] or 'never'
         return (f'<p class="message partial">This is the online copy, for viewing only. '
-                f'Last uploaded from the shop: {escape(when)}. Make changes in the shop.</p>')
-    if st['stale']:
-        age = ('has never been uploaded' if st['last'] is None
-               else f"was last uploaded {st['days']} day(s) ago")
-        return (f'<p class="message partial">The online copy {age}. Connect to the network and '
-                f'press <a href="/owner-reports">Upload to cloud</a> on Owner Reports.</p>')
+                f'Last synced with the shop: {when}.</p>')
+    if SHOP_MODE:
+        if st['holder'] == 'online':
+            return ('<p class="message partial">Online is in charge, so this shop copy is view-only. '
+                    'When connected, press <a href="/owner-reports">Bring back to shop</a> '
+                    'on Owner Reports.</p>')
+        if is_admin and cloud_configured() and st['stale']:
+            age = ('has never been synced' if st['last'] is None
+                   else f"was last synced {st['days']} day(s) ago")
+            return (f'<p class="message partial">The online copy {age}. Connect to the network and '
+                    f'press <a href="/owner-reports">Upload</a> on Owner Reports.</p>')
+        return ''
+    if st['holder'] == 'shop':
+        return (f'<p class="message partial">The shop is in charge, so this online copy is view-only. '
+                f'Last synced with the shop: {when}.</p>')
+    if st['holder'] == 'online':
+        return (f'<p class="message success">Online is in charge since {escape(st["since"] or "")}. '
+                f'Back in the shop, press Bring back to shop on Owner Reports.</p>')
     return ''
 
 
 @app.before_request
 def _online_copy_is_read_only() -> ResponseReturnValue | None:
-    if not READ_ONLY or request.method in ('GET', 'HEAD', 'OPTIONS'):
+    if request.method in ('GET', 'HEAD', 'OPTIONS') or request.endpoint in READ_ONLY_ALLOWED:
         return None
-    if request.endpoint in READ_ONLY_ALLOWED:
+    if not read_only_now():
         return None
     if request.path.startswith('/api/'):
-        return jsonify({'error': 'This is the online copy, for viewing only.'}), 403
-    return render_template('read_only.html', back=request.referrer or '/dashboard'), 403
+        return jsonify({'error': 'This copy is view-only right now.'}), 403
+    return render_template('read_only.html', back=request.referrer or '/dashboard',
+                           shop=SHOP_MODE), 403
 
 
 def website_linked() -> bool:

@@ -47,9 +47,9 @@ Environment variables:
 | `WEBSITE_URL` | The public website, e.g. `https://healinghubpharmacy.vercel.app`. Chronic sales send refill reminders there |
 | `TILL_SYNC_SECRET` | Long random string, **the same** as on the website. Proves reminders come from the till |
 | `SHOP_MODE` | `1` on the shop computer (docker-compose sets it). Sales never wait for the network |
-| `CLOUD_MONGODB_URI` | Shop computer only: the Atlas connection string that **Upload to cloud** copies to |
-| `READ_ONLY` | `1` on Vercel: the online copy is for viewing; changes are made in the shop |
-| `UPLOAD_WARN_DAYS` | Warn on every page when the last upload is older than this (default `3`) |
+| `CLOUD_MONGODB_URI` | Shop computer only: the Atlas connection string the shop syncs with |
+| `READ_ONLY` | Optional: `1` forces a copy to stay view-only. Normally the app decides, from who is in charge |
+| `UPLOAD_WARN_DAYS` | Warn admins in the shop when the last sync is older than this (default `3`) |
 | `OWNER_WHATSAPP` | Owner's number for the WhatsApp summary and alerts, e.g. `26658000000` |
 | `GMAIL_USER`, `GMAIL_APP_PASSWORD`, `OWNER_EMAIL` | Optional: also allow the owner messages by email |
 | `CRON_SECRET` | Optional: protects `/api/cron/daily` if you schedule it yourself |
@@ -126,19 +126,31 @@ internet is needed to sell, receive or count stock.
    `CLOUD_MONGODB_URI` (the Atlas connection string) and `OWNER_WHATSAPP`.
 3. `docker compose up -d --build`. The app is at `http://<shop computer's IP>:5000`.
 
-**Uploading.** When the computer is connected to the network, an admin opens
-**Owner Reports** and presses **Upload to cloud now**. Only records changed since
-the last upload are sent. **Full upload** checks every record, which also repairs an
-online copy that was changed by hand. Every page warns the admin when the last upload
-is older than `UPLOAD_WARN_DAYS`.
+**Taking turns.** The shop copy and the online copy (Vercel, on the same Atlas
+database as `CLOUD_MONGODB_URI`) take turns being *in charge*. The copy in charge
+accepts changes; the other is view-only and says so on every page. So the two can
+never disagree. From the shop's **Owner Reports**, when connected:
 
-**The online copy** is the Vercel deployment with `READ_ONLY=1`. It shows the shop's
-records as at the last upload, feeds the website's product list, and refuses changes.
-Changes made online would be overwritten by the next upload, which is why they are
-refused.
+| Button | What happens |
+| --- | --- |
+| **Upload** | Shop changes go up. The shop stays in charge |
+| **Upload and hand over to online** | Shop changes go up, and online takes charge: work away from the shop |
+| **Bring back to shop** | Changes made online come down, and the shop takes charge again |
+
+Only records that changed since the last sync move, so a sync is quick on mobile
+data; one cut off half way simply finishes next time, and control only changes hands
+when the sync succeeds. **Full upload** (shop in charge only) checks every record and
+repairs an online copy that was changed by hand.
+
+**Emergencies.** If the network is down when the shop must sell, or the shop computer
+is broken when work must go on online, the copy that needs it can **take charge here
+now** (Owner Reports, ticked to confirm). The next sync from the shop brings both copies
+level. A record changed in both places keeps the shop's version and is listed on Owner
+Reports for checking; for a stock item, a quick count settles it. Sales made in both
+places are all kept.
 
 **Backups.** Until the next upload, the shop computer holds the only copy of the
-latest sales. Upload at least every few days, and download a backup from `/backup` regularly.
+latest sales. Sync at least every few days, and download a backup from `/backup` regularly.
 
 ## WhatsApp messages
 

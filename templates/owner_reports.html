@@ -10,20 +10,46 @@
 {% block content %}
 {% if message %}<p class="message {{ message_class or 'success' }}">{{ message }}</p>{% endif %}
 
-{% if can_upload %}
-<h2>Upload to cloud</h2>
-<p>{% if upload.last %}Last upload: <strong>{{ upload.when }}</strong> by {{ upload.last.by }}
-({{ upload.last.sent }} record(s) sent).{% else %}Nothing has been uploaded yet.{% endif %}
-Connect this computer to the network, then press the button. Only records that changed since the last
-upload are sent, so it is quick.</p>
+<h2>Shop and online</h2>
+{% set u = upload %}
+<p>{% if u.holder == 'online' %}<strong>Online is in charge</strong>{% elif u.holder == 'shop' %}<strong>The shop is in charge</strong>{% else %}Not synced yet{% endif %}{% if u.since %} since {{ u.since }}{% if u.by %} ({{ u.by }}){% endif %}{% endif %}{% if u.emergency %}, taken in an emergency{% endif %}.
+The copy in charge accepts changes; the other is view-only until control is handed back.
+{% if u.last %}Last sync: {{ u.when }} by {{ u.last.by }}.{% endif %}</p>
+{% if u.last and u.last.conflict_count %}
+<div class="message partial">At the last sync {{ u.last.conflict_count }} record(s) had been changed both in the
+shop and online. The shop's version was kept; please check them (for stock items, a quick count):
+<ul>{% for c in u.last.conflicts %}<li>{{ c }}</li>{% endfor %}</ul></div>
+{% endif %}
+
+{% if in_shop %}
+    {% if u.holder == 'online' %}
+<p>Connect this computer to the network, then bring the records back. Everything changed online comes down,
+and the shop takes charge again.</p>
+<form method="POST"><button type="submit" name="send" value="takeback">Bring back to shop</button></form>
+    {% else %}
+<p>Connect this computer to the network, then choose. Only records that changed since the last sync are sent.</p>
 <form method="POST" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
-    <button type="submit" name="send" value="upload">Upload to cloud now</button>
+    <button type="submit" name="send" value="upload">Upload (the shop stays in charge)</button>
+    <button type="submit" name="send" value="handover">Upload and hand over to online</button>
     <label style="font-weight:normal;"><input type="checkbox" name="full" value="1" style="width:auto;">
         Full upload (checks every record; use if the online copy looks wrong)</label>
 </form>
-{% elif read_only %}
-<p class="message partial">This is the online copy. It shows the shop's records as at the last upload
-({{ upload.when or 'never' }}).</p>
+    {% endif %}
+{% elif side == 'online' and u.holder == 'online' %}
+<p>You are working online. When you are back in the shop, connect and press <strong>Bring back to shop</strong>
+on the shop computer's Owner Reports.</p>
+{% endif %}
+
+{% if u.holder and u.holder != side %}
+<details style="margin-top:10px;"><summary>Emergency: take charge without the network</summary>
+<p>Only if {% if side == 'shop' %}the network is down and the shop must sell{% else %}the shop computer is broken
+or switched off and work must go on{% endif %}. Changes made in the other copy since the last sync stay there until
+the next sync from the shop. Anything changed in both places is then kept as the shop's version and listed here.</p>
+<form method="POST" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
+    <label style="font-weight:normal;"><input type="checkbox" name="confirm" value="1" style="width:auto;">
+        I understand</label>
+    <button type="submit" name="send" value="emergency">Take charge here now</button>
+</form></details>
 {% endif %}
 
 <h2>Send on WhatsApp</h2>
@@ -35,7 +61,7 @@ The weekly alerts are best sent every {{ weekly_day }}, so orders can go in befo
     <a class="wa-btn" href="{{ wa_daily }}" target="_blank" rel="noopener">Send today's summary</a>
     <a class="wa-btn" href="{{ wa_weekly }}" target="_blank" rel="noopener">Send the weekly alerts</a>
 </p>
-{% if email_on and not read_only %}
+{% if email_on %}
 <form method="POST" style="display:flex;gap:8px;flex-wrap:wrap;">
     <button type="submit" name="send" value="daily">Email today's summary instead</button>
     <button type="submit" name="send" value="weekly">Email the weekly alerts instead</button>

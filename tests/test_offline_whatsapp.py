@@ -43,94 +43,153 @@ def reset():
 
 today = A.local_now().date()
 
-print('\n--- 1. Upload to cloud ---')
+print('\n--- 1. Upload: the shop stays in charge ---')
 reset()
+A.SHOP_MODE = True
 db['medications'].insert_many([{'name': f'Item {i}', 'balance': i, 'price': 1.0} for i in range(3)])
 db['sales'].insert_one({'receipt_no': 'S1', 'total': 10.0})
 r = A.upload_to_cloud(db, 'Owner')
 check('first upload sends every record', r['sent'] == 4, r)
 check('the online copy now matches', cloud['medications'].count_documents({}) == 3
       and cloud['sales'].count_documents({}) == 1)
-check('the bookkeeping collection stays in the shop', 'sync_hashes' not in cloud.list_collection_names())
-check('the online copy knows when it was uploaded', cloud['sync_log'].count_documents({'ok': True}) == 1)
+check('the bookkeeping stays in the shop', 'sync_hashes' not in cloud.list_collection_names())
+check('both copies agree the shop is in charge',
+      A.baton_holder(db) == 'shop' and A.baton_holder(cloud) == 'shop')
 r = A.upload_to_cloud(db, 'Owner')
-check('nothing changed: nothing is sent again', r['sent'] == 0, r)
+check('nothing changed: nothing is sent again', r['sent'] == 0 and r['received'] == 0, r)
 db['medications'].update_one({'name': 'Item 1'}, {'$set': {'balance': 99}})
 db['medications'].delete_one({'name': 'Item 2'})
 r = A.upload_to_cloud(db, 'Owner')
 check('only the changed record is sent', r['sent'] == 1, r)
-check('a record deleted in the shop is deleted online', r['removed'] == 1
-      and cloud['medications'].count_documents({'name': 'Item 2'}) == 0, r)
-check('the change arrived', cloud['medications'].find_one({'name': 'Item 1'})['balance'] == 99)
+check('a record deleted in the shop is deleted online',
+      cloud['medications'].count_documents({'name': 'Item 2'}) == 0, r)
 cloud['medications'].update_one({'name': 'Item 0'}, {'$set': {'balance': -5}})
-cloud['medications'].insert_one({'name': 'Typed in online'})
 r = A.upload_to_cloud(db, 'Owner')
-check('a normal upload does not notice edits made online', r['sent'] == 0)
+check('while the shop is in charge, online is not read back', r['received'] == 0)
 r = A.upload_to_cloud(db, 'Owner', full=True)
-check('a full upload repairs them', cloud['medications'].find_one({'name': 'Item 0'})['balance'] == 0
-      and cloud['medications'].count_documents({'name': 'Typed in online'}) == 0, r)
-r = A.upload_to_cloud(db, 'Owner')
-check('after a full upload, nothing is pending', r['sent'] == 0, r)
+check('a full upload repairs the online copy', cloud['medications'].find_one({'name': 'Item 0'})['balance'] == 0, r)
 
-print('\n--- 2. The upload button ---')
+print('\n--- 2. Hand over to online, work online, bring back ---')
+r = A.sync_with_cloud(db, 'Owner', hand_to='online')
+check('handing over puts online in charge on both sides',
+      A.baton_holder(db) == 'online' and A.baton_holder(cloud) == 'online')
+login()
+resp = c.post('/write-off', data={'med_name': 'Item 0', 'quantity': '1'})
+check('the shop is now view-only, and says how to get control back',
+      resp.status_code == 403 and 'Bring back to shop' in resp.get_data(as_text=True))
+page = c.get('/sales').get_data(as_text=True)
+check('every shop page says online is in charge', 'Online is in charge' in page)
+check('Owner Reports offers Bring back to shop', 'value="takeback"' in c.get('/owner-reports').get_data(as_text=True))
+# Online, working away from the shop
+A.SHOP_MODE = False
+A.get_mongo_client = lambda: _cloud_client
+check('the online copy accepts changes while in charge', not A.read_only_now())
+cloud['sales'].insert_one({'receipt_no': 'S9', 'total': 77.0})
+cloud['medications'].update_one({'name': 'Item 1'}, {'$set': {'balance': 50}})
+cloud['medications'].delete_one({'name': 'Item 0'})
+cloud['audit_log'].insert_one({'action': 'CREATE', 'target_id': 'S9'})
+page = c.get('/sales').get_data(as_text=True)
+check('online pages say online is in charge', 'Online is in charge since' in page)
+A.SHOP_MODE = True
+A.get_mongo_client = lambda _client=_f: _client
+resp = c.post('/owner-reports', data={'send': 'takeback'}, follow_redirects=True)
+body = resp.get_data(as_text=True)
+check('Bring back to shop reports what came down', 'Back in the shop' in body and 'received' in body,
+      body[body.find('Back in'):body.find('Back in') + 200])
+check('the online sale is now in the shop', db['sales'].count_documents({'receipt_no': 'S9'}) == 1)
+check('the online stock change is in the shop', db['medications'].find_one({'name': 'Item 1'})['balance'] == 50)
+check('a record deleted online is deleted in the shop', db['medications'].count_documents({'name': 'Item 0'}) == 0)
+check('new log entries came down too', db['audit_log'].count_documents({'target_id': 'S9'}) == 1)
+check('the shop is in charge again', A.baton_holder(db) == 'shop' and A.baton_holder(cloud) == 'shop')
+check('and can make changes again', not A.read_only_now())
+r = A.upload_to_cloud(db, 'Owner')
+check('the next upload sends only the audit note of the take-back', r['sent'] == 1 and r['received'] == 0, r)
+r = A.upload_to_cloud(db, 'Owner')
+check('after the round trip nothing is left to move', r['sent'] == 0 and r['received'] == 0, r)
+
+print('\n--- 3. Emergency, and records changed in both places ---')
+A.sync_with_cloud(db, 'Owner', hand_to='online')
+cloud['medications'].update_one({'name': 'Item 1'}, {'$set': {'balance': 40}})   # online sold some
+cloud['sales'].insert_one({'receipt_no': 'S10', 'total': 5.0})
+login()
+resp = c.post('/owner-reports', data={'send': 'emergency'}, follow_redirects=True)
+check('the emergency needs a tick to confirm', 'Tick the box' in resp.get_data(as_text=True)
+      and A.baton_holder(db) == 'online')
+c.post('/owner-reports', data={'send': 'emergency', 'confirm': '1'})
+check('the shop takes charge without the network', A.baton_holder(db) == 'shop' and A.read_only_now() is False)
+db['medications'].update_one({'name': 'Item 1'}, {'$set': {'balance': 45}})       # shop sold some too
+db['sales'].insert_one({'receipt_no': 'S11', 'total': 6.0})
+r = A.upload_to_cloud(db, 'Owner')
+check('the record changed in both places is listed', r['conflict_count'] == 1
+      and 'Item 1' in r['conflicts'][0], r['conflicts'])
+check("the shop's version is kept in both copies",
+      db['medications'].find_one({'name': 'Item 1'})['balance'] == 45
+      and cloud['medications'].find_one({'name': 'Item 1'})['balance'] == 45)
+check('sales made in each place are all kept', db['sales'].count_documents({'receipt_no': {'$in': ['S10', 'S11']}}) == 2
+      and cloud['sales'].count_documents({'receipt_no': {'$in': ['S10', 'S11']}}) == 2)
+page = c.get('/owner-reports').get_data(as_text=True)
+check('Owner Reports lists it for checking', 'changed both in the' in page and 'medications: Item 1' in page)
+# Online takes charge in an emergency while the shop holds it (shop computer broken)
+A.SHOP_MODE = False
+A.get_mongo_client = lambda: _cloud_client
+check('online is view-only while the shop is in charge', A.read_only_now())
+A.emergency_take_control(cloud, 'Owner')
+check('online can take charge in an emergency', not A.read_only_now())
+cloud['sales'].insert_one({'receipt_no': 'S12', 'total': 8.0})
+A.SHOP_MODE = True
+A.get_mongo_client = lambda _client=_f: _client
+r = A.upload_to_cloud(db, 'Owner')
+check('the next shop sync brings the online work down', db['sales'].count_documents({'receipt_no': 'S12'}) == 1
+      and A.baton_holder(cloud) == 'shop', r)
+A.sync_with_cloud(db, 'Owner', hand_to='online')
+try:
+    A.sync_with_cloud(db, 'Owner', hand_to='shop', full=True)
+    refused = False
+except RuntimeError:
+    refused = True
+check('a full upload is refused while online is in charge', refused)
+A.sync_with_cloud(db, 'Owner', hand_to='shop')
+
+print('\n--- 4. Buttons, messages and warnings ---')
 login()
 page = c.get('/owner-reports').get_data(as_text=True)
-check('Owner Reports shows the upload button', 'Upload to cloud now' in page)
-check('and the time of the last upload', 'Last upload:' in page)
-db['sales'].insert_one({'receipt_no': 'S2', 'total': 5.0})
+check('the shop is offered upload and hand-over', 'value="upload"' in page and 'value="handover"' in page)
+db['medications'].insert_one({'name': 'New item', 'balance': 1, 'price': 1.0})
 resp = c.post('/owner-reports', data={'send': 'upload'}, follow_redirects=True)
-body = resp.get_data(as_text=True)
-check('pressing it uploads and says what was sent', 'Uploaded: 1 changed record' in body, body[-600:])
-check('the upload is in the audit log', db['audit_log'].count_documents({'target_type': 'cloud_copy'}) == 1)
+check('pressing Upload says what was sent', 'Uploaded: 1 record(s) sent' in resp.get_data(as_text=True))
+check('the sync is in the audit log', db['audit_log'].count_documents({'target_type': 'cloud_copy'}) >= 1)
 A._cloud_db = lambda: (_ for _ in ()).throw(RuntimeError('no network'))
-resp = c.post('/owner-reports', data={'send': 'upload'}, follow_redirects=True)
-check('no network: a clear message, nothing pretended',
-      'Upload failed' in resp.get_data(as_text=True)
-      and db['sync_log'].count_documents({'ok': False}) == 1)
+resp = c.post('/owner-reports', data={'send': 'handover'}, follow_redirects=True)
+check('no network: a clear message, and control does not change hands',
+      'nothing changed hands' in resp.get_data(as_text=True) and A.baton_holder(db) == 'shop')
 A._cloud_db = lambda: cloud
 login(role='employee', name='Nurse')
 n_logs = db['sync_log'].count_documents({})
-check('staff cannot upload', c.post('/owner-reports', data={'send': 'upload'}).status_code == 302
+check('staff cannot sync', c.post('/owner-reports', data={'send': 'upload'}).status_code == 302
       and db['sync_log'].count_documents({}) == n_logs)
-
-print('\n--- 3. Upload reminders on every page ---')
-A.SHOP_MODE = True
 login()
 db['sync_log'].update_many({}, {'$set': {'at': datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=5)}})
-page = c.get('/sales').get_data(as_text=True)
-check('an admin in the shop is told when the upload is overdue', 'was last uploaded 5 day(s) ago' in page)
-db['sync_log'].insert_one({'at': datetime.now(timezone.utc).replace(tzinfo=None), 'by': 'Owner', 'ok': True, 'sent': 0})
-page = c.get('/sales').get_data(as_text=True)
-check('no warning after a fresh upload', 'last uploaded' not in page)
+check('an admin in the shop is told when a sync is overdue',
+      'was last synced 5 day(s) ago' in c.get('/sales').get_data(as_text=True))
 login(role='employee', name='Nurse')
-db['sync_log'].delete_many({})
-page = c.get('/sales').get_data(as_text=True)
-check('staff do not see the upload warning', 'Upload to cloud' not in page)
-A.SHOP_MODE = False
-
-print('\n--- 4. The online copy is view-only ---')
-A.READ_ONLY = True
+check('staff do not see that warning', 'last synced' not in c.get('/sales').get_data(as_text=True))
 login()
-db['sync_log'].insert_one({'at': datetime.now(timezone.utc).replace(tzinfo=None), 'by': 'Owner', 'ok': True, 'sent': 0})
+A.SHOP_MODE = False
+A.get_mongo_client = lambda: _cloud_client
 page = c.get('/sales').get_data(as_text=True)
-check('every page says it is the online copy', 'online copy, for viewing only' in page)
-before = db['medications'].count_documents({})
-resp = c.post('/write-off', data={'med_name': 'Item 0', 'quantity': '1'})
-check('a change is refused with an explanation', resp.status_code == 403
-      and 'Make the change there' in resp.get_data(as_text=True))
-check('nothing changed', db['medications'].count_documents({}) == before
-      and db['transactions'].count_documents({'type': 'damage'}) == 0)
-check('the owner page has no upload button online', 'Upload to cloud now' not in
-      c.get('/owner-reports').get_data(as_text=True))
+check('online, while the shop is in charge, pages say view-only', 'this online copy is view-only' in page)
+resp = c.post('/write-off', data={'med_name': 'Item 1', 'quantity': '1'})
+check('and changes are refused, pointing to the hand-over', resp.status_code == 403
+      and 'Upload and hand over to online' in resp.get_data(as_text=True))
 rr = c.post('/reports', data={'report_type': 'stock_on_hand'})
-check('reports can still be run', rr.status_code == 200 and 'online copy, for viewing only' in rr.get_data(as_text=True)
-      and 'Nothing was saved' not in rr.get_data(as_text=True), rr.status_code)
-check('a refill message cannot be marked online',
-      c.post('/refills/whatsapp', data={'receipt_no': 'S1'}).status_code == 403)
+check('reports can still be run', rr.status_code == 200, rr.status_code)
+check('a refill message cannot be marked', c.post('/refills/whatsapp', data={'receipt_no': 'S1'}).status_code == 403)
 os.environ['CRON_SECRET'] = 'cs'
 r = c.get('/api/cron/daily', headers={'Authorization': 'Bearer cs'})
-check('the evening job does nothing online', 'skipped' in r.get_json())
-A.READ_ONLY = False
+check('the evening job does nothing on a view-only copy', 'skipped' in r.get_json())
+A.SHOP_MODE = False
+A.get_mongo_client = lambda _client=_f: _client
+db['sync_control'].delete_many({})
 
 print('\n--- 5. WhatsApp numbers and links ---')
 check('a local number gets 266', A.wa_number('5812 3456') == '26658123456')
