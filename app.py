@@ -8965,7 +8965,8 @@ def upload_banner(is_admin: bool) -> str:
                 f'Last synced with the shop: {when}.</p>')
     if st['holder'] == 'online':
         return (f'<p class="message success">Online is in charge since {escape(st["since"] or "")}. '
-                f'Back in the shop, press Bring back to shop on Owner Reports.</p>')
+                f'Back in the shop, press Bring back to shop on the shop computer\'s Owner Reports '
+                f'(not here).</p>')
     return ''
 
 

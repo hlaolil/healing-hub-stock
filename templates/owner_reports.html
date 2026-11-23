@@ -36,8 +36,9 @@ and the shop takes charge again.</p>
 </form>
     {% endif %}
 {% elif side == 'online' and u.holder == 'online' %}
-<p>You are working online. When you are back in the shop, connect and press <strong>Bring back to shop</strong>
-on the shop computer's Owner Reports.</p>
+<p>You are working online. The <strong>Bring back to shop</strong> button is not here: it is on the
+<strong>shop computer's</strong> Owner Reports (http://localhost:5000/owner-reports there). Connect that
+computer to the network and press it.</p>
 {% endif %}
 
 {% if u.holder and u.holder != side %}
