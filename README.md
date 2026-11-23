@@ -80,7 +80,7 @@ pip install mongomock
 python tests/run_all.py
 ```
 
-28 suites, 1,918 checks, run against an in-memory database. `tests/test_pos.py` covers the till, receipts, voids, cash-up and the public feed.
+29 suites, 1,969 checks, run against an in-memory database. `tests/test_pos.py` covers the till, receipts, voids, cash-up and the public feed.
 
 ## Run it on your own computer
 
@@ -151,6 +151,19 @@ places are all kept.
 
 **Backups.** Until the next upload, the shop computer holds the only copy of the
 latest sales. Sync at least every few days, and download a backup from `/backup` regularly.
+
+## From HealthRecords (23 Nov 2026)
+
+- **Several invoices per delivery**: one consignment can come with several
+  invoices, and an invoice that arrives later can be added to an open delivery.
+- **Monthly indicators on the dashboard** for the staff meeting: stock-out rate
+  against a 10% objective (items at zero for over six months are left out),
+  expired medicine and its cost, and full stock counts against two a year.
+- **Medication Errors** (`/meeting-log`): dispensing, labelling, prescribing and
+  near-miss errors, counted on the dashboard. No patient or staff names.
+- **Stock take**: a whole sheet of "agrees" ticks posts as one small request;
+  Download CSV keeps the stock take; a CSV count sheet for the Stock Take phone app.
+- Table headings stay in view while scrolling.
 
 ## WhatsApp messages
 

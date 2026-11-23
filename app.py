@@ -592,6 +592,7 @@ def get_nav_links() -> str:
             <a href="/sell">Point of Sale</a> |
             <a href="/sales">Sales</a> |
             <a href="/refills">Refill calls</a> |
+            <a href="/meeting-log">Medication Errors</a> |
             <a href="/dashboard">Dashboard</a> |
             <a href="/receive">Receiving</a> |
             <a href="/write-off">Write-offs</a> |
@@ -1634,6 +1635,51 @@ def _delivery_goods_value(transactions: Collection, delivery_id: Any) -> float:
                                  {'_id': 0, 'quantity': 1, 'price': 1, 'line_value': 1}))
 
 
+def _delivery_invoices(d: Doc) -> list[Doc]:
+    """A delivery's invoices: [{'number', 'total'}]. One consignment can come
+    with several invoices; a delivery opened before that was possible holds
+    its one invoice in invoice_number / invoice_total."""
+    if d.get('invoices'):
+        return list(d['invoices'])
+    if d.get('invoice_number') or d.get('invoice_total'):
+        return [{'number': d.get('invoice_number') or '', 'total': d.get('invoice_total', 0) or 0}]
+    return []
+
+
+def _invoice_fields(invoices: list[Doc]) -> Doc:
+    """What a delivery stores for its invoices. Besides the list, the numbers
+    joined and the amounts added up are kept in invoice_number / invoice_total,
+    so the three-way match, the order roll-up, the lines (which carry the
+    invoice number) and every report read a multi-invoice delivery as one."""
+    return {'invoices': invoices,
+            'invoice_number': ', '.join(i['number'] for i in invoices),
+            'invoice_total': round(sum(i['total'] for i in invoices), 2)}
+
+
+def _read_invoices(numbers: list[str], totals: list[str]) -> list[Doc]:
+    """Invoice rows from a form, checked. Blank rows are skipped; a row with
+    only one of number and amount, a bad amount, or a number twice is refused."""
+    out: list[Doc] = []
+    for num, tot in zip(numbers, totals):
+        num, tot = (num or '').strip(), (tot or '').strip()
+        if not num and not tot:
+            continue
+        if not num or not tot:
+            raise ValueError('each invoice needs both its number and its amount')
+        try:
+            amount = float(tot)
+        except ValueError:
+            raise ValueError(f'the amount of invoice {num} is not a number')
+        if amount < 0:
+            raise ValueError(f'the amount of invoice {num} cannot be negative')
+        if any(i['number'].lower() == num.lower() for i in out):
+            raise ValueError(f'invoice {num} is listed twice')
+        out.append({'number': num, 'total': round(amount, 2)})
+    if not out:
+        raise ValueError('add at least one invoice')
+    return out
+
+
 def _order_rollup(deliveries: Collection, transactions: Collection, order_number: str | None) -> Doc | None:
     """NEW (Multiple invoices per order): one purchase order is normally
     fulfilled across several part-deliveries, each with its own invoice. The
@@ -1657,7 +1703,8 @@ def _order_rollup(deliveries: Collection, transactions: Collection, order_number
     outstanding = order_total - invoiced
     return {
         'order_number': order_number, 'order_total': order_total,
-        'invoice_count': len(sibs), 'invoiced': invoiced, 'goods': goods,
+        'invoice_count': sum(len(_delivery_invoices(d)) or 1 for d in sibs),
+        'invoiced': invoiced, 'goods': goods,
         'outstanding': outstanding,
         'over_invoiced': invoiced - order_total > 0.005,
         'fully_invoiced': abs(outstanding) < 0.01,
@@ -1786,13 +1833,15 @@ def receive() -> ResponseReturnValue:
             if action == 'open':
                 try:
                     reference = f"DEL-{datetime.utcnow().strftime('%Y%m%d')}-{uuid4().hex[:4].upper()}"
+                    # One consignment may come with several invoices.
+                    invoices = _read_invoices(request.form.getlist('invoice_number'),
+                                              request.form.getlist('invoice_total'))
                     new_id = deliveries.insert_one({
                         'reference': reference,
                         'supplier': request.form['supplier'].strip(),
                         'order_number': request.form['order_number'].strip(),
                         'order_total': float(request.form['order_total']),
-                        'invoice_number': request.form['invoice_number'].strip(),
-                        'invoice_total': float(request.form['invoice_total']),
+                        **_invoice_fields(invoices),
                         'stock_receiver': request.form['stock_receiver'].strip(),
                         'note': (request.form.get('note') or '').strip(),
                         'status': 'open',
@@ -1801,12 +1850,47 @@ def receive() -> ResponseReturnValue:
                         'closed_by': None, 'closed_at': None,
                     }).inserted_id
                     write_audit_entry('CREATE', 'delivery', reference,
-                                      f'Delivery {reference} opened by {current_user}')
-                    flash(f'Delivery {reference} opened.')
+                                      f'Delivery {reference} opened by {current_user} with '
+                                      + '; '.join(f"invoice {i['number']} M{i['total']:.2f}"
+                                                  for i in invoices))
+                    flash(f'Delivery {reference} opened'
+                          + (f' with {len(invoices)} invoices, M{sum(i["total"] for i in invoices):.2f} in all.'
+                             if len(invoices) > 1 else '.'))
                     return redirect(url_for('receive', delivery_id=str(new_id)))
                 except (ValueError, KeyError) as e:
                     flash(f'Invalid delivery details: {e}')
                     return redirect(url_for('receive'))
+
+            if action == 'add_invoice':
+                # An invoice that turns up after the delivery was opened.
+                d = _load_delivery(deliveries, request.form.get('delivery_id'))
+                if not d:
+                    flash('Delivery not found.')
+                    return redirect(url_for('receive'))
+                inv_back = url_for('receive', delivery_id=str(d['_id']))
+                if d['status'] != 'open':
+                    flash(f"Delivery {d['reference']} is closed, so no invoice can be added.")
+                    return redirect(inv_back)
+                inv_have = _delivery_invoices(d)
+                try:
+                    inv_more = _read_invoices(request.form.getlist('invoice_number'),
+                                          request.form.getlist('invoice_total'))
+                    for inv in inv_more:
+                        if any(h['number'].lower() == inv['number'].lower() for h in inv_have):
+                            raise ValueError(f"invoice {inv['number']} is already on this delivery")
+                except ValueError as e:
+                    flash(f'Invoice not added: {e}.')
+                    return redirect(inv_back)
+                inv_fields = _invoice_fields(inv_have + inv_more)
+                deliveries.update_one({'_id': d['_id']}, {'$set': inv_fields})
+                # Lines already received carry the invoice number; keep them in step.
+                transactions.update_many({'type': 'receive', 'delivery_id': str(d['_id'])},
+                                         {'$set': {'invoice_number': inv_fields['invoice_number']}})
+                write_audit_entry('UPDATE', 'delivery', d['reference'],
+                                  'invoice added: ' + '; '.join(f"{i['number']} M{i['total']:.2f}" for i in inv_more))
+                flash(f"Invoice {', '.join(i['number'] for i in inv_more)} added. "
+                      f"{len(inv_fields['invoices'])} invoices, M{inv_fields['invoice_total']:.2f} in all.")
+                return redirect(inv_back)
 
             if action == 'line':
                 d = _load_delivery(deliveries, request.form.get('delivery_id'))
@@ -2039,6 +2123,7 @@ def receive() -> ResponseReturnValue:
             search=search, rx_data=rx_data,
             current_user=session['user']['name'],
             delivery=delivery, delivery_lines=delivery_lines, recon=recon,
+            delivery_invoices=_delivery_invoices(delivery) if delivery else [],
             deliveries=delivery_rows, order_summary=order_summary,
             pager=pager, window_defaulted=window_defaulted, unit='receipts',
             upload_draft=upload_draft,
@@ -5963,6 +6048,218 @@ def _controlled_delta(tx: Doc) -> float:
 
 
 
+# -----------------------------------------------------------------------
+# NEW (Staff meeting): the pharmacy's five key indicators for one month,
+# as the monthly staff meeting agenda asks for them:
+#
+#   1. Stock-out rate vs objective    3. Full stock counts vs expected
+#   2. Expired medicines vs cost      4. Medication errors reported
+#
+# 1-3 come from the stock records already kept. Errors were on paper, so
+# they have their own small log (/meeting-log) and are counted from there.
+# -----------------------------------------------------------------------
+STOCKOUT_OBJECTIVE_PCT = 10.0       # no more than 10% of items out of stock
+STOCKOUT_DORMANT_MONTHS = 6         # at zero longer than this: left out of the rate
+FULL_COUNTS_PER_YEAR = 2            # two full stock counts a year, one per half
+# A stock take is a FULL count when it counted at least this share of the
+# items on the books; anything less is a spot or partial count.
+FULL_COUNT_COVERAGE_PCT = 90.0
+MED_ERROR_TYPES = ['Dispensing', 'Labelling', 'Prescribing', 'Near-miss', 'Other']
+
+
+def _local_month_bounds(y: int, m: int) -> tuple[datetime, datetime]:
+    """[start, end) of a month on the pharmacy's calendar, as stored (UTC) times."""
+    off = timedelta(hours=PHARMACY_UTC_OFFSET_HOURS)
+    start = datetime(y, m, 1)
+    end = datetime(y + (m == 12), 1 if m == 12 else m + 1, 1)
+    return start - off, end - off
+
+
+def _meeting_month_choices(n: int = 12) -> list[tuple[str, str]]:
+    """('YYYY-MM', 'November 2026') for the last n months, newest first."""
+    today = local_now()
+    y, m = today.year, today.month
+    out = []
+    for _ in range(n):
+        out.append((f'{y:04d}-{m:02d}', datetime(y, m, 1).strftime('%B %Y')))
+        m -= 1
+        if m == 0:
+            m, y = 12, y - 1
+    return out
+
+
+def _default_meeting_month() -> str:
+    """The month a meeting reports on: the last COMPLETE month. A meeting
+    early in December reports on November, which is what the agenda means."""
+    t = local_now()
+    y, m = (t.year, t.month - 1) if t.month > 1 else (t.year - 1, 12)
+    return f'{y:04d}-{m:02d}'
+
+
+def _tx_effect(tx: Doc) -> float:
+    """What one transaction did to the shelf balance, signed. Direction comes
+    from the type, never the stored sign (see CONTROLLED_DIRECTION)."""
+    kind = tx.get('type')
+    qty = tx.get('quantity', 0) or 0
+    if kind == 'adjustment':
+        return qty
+    return CONTROLLED_DIRECTION.get(kind, 0) * abs(qty)
+
+
+def _meeting_kpis(db: Any, y: int, m: int, cat: str) -> Doc:
+    start, end = _local_month_bounds(y, m)
+    meds = _by_name(db['medications'].find(_active(_category_filter(cat)),
+                                           {'_id': 0, 'name': 1, 'balance': 1}))
+    names = [d.get('name', '') for d in meds]
+
+    # --- 1. Stock-out: did the balance touch zero at ANY point? ----------
+    # Start from today's balance, undo everything after the month to get the
+    # closing balance, then walk backwards. The lowest point inside the month
+    # is what the shelf got down to.
+    #
+    # An item that has sat at zero for more than six months is no longer a
+    # stock-out to be managed — it is dormant or discontinued — so it is left
+    # out of the rate entirely, from both the items counted and the items
+    # tracked, and listed separately. The walk therefore goes back to the
+    # start of the six months ending with the chosen month.
+    dy, dm = y, m - (STOCKOUT_DORMANT_MONTHS - 1)
+    while dm < 1:
+        dm, dy = dm + 12, dy - 1
+    dormant_from, _ = _local_month_bounds(dy, dm)
+    txs_by_med: defaultdict[str, list[Doc]] = defaultdict(list)
+    for tx in db['transactions'].find(
+            {'timestamp': {'$gte': min(start, dormant_from)}, 'med_name': {'$in': names},
+             'type': {'$in': list(CONTROLLED_DIRECTION)}},
+            {'_id': 0, 'med_name': 1, 'type': 1, 'quantity': 1, 'timestamp': 1}):
+        txs_by_med[tx.get('med_name', '')].append(tx)
+
+    stocked_out, dormant = [], []
+    for d in meds:
+        name = d.get('name', '')
+        bal = d.get('balance', 0) or 0
+        txs = txs_by_med.get(name, [])
+        bal -= sum(_tx_effect(t) for t in txs if t['timestamp'] >= end)
+        closing = bal
+        lowest = highest = bal
+        for t in sorted((t for t in txs if t['timestamp'] < end),
+                        key=lambda t: t['timestamp'], reverse=True):
+            bal -= _tx_effect(t)                      # balance before t
+            if t['timestamp'] >= start:
+                lowest = min(lowest, bal)
+            highest = max(highest, bal)
+        if highest <= 0:                              # zero the whole six months
+            dormant.append(name)
+        elif lowest <= 0:
+            stocked_out.append({'med_name': name, 'zero_at_end': closing <= 0})
+    tracked = len(meds) - len(dormant)
+    so_pct = (len(stocked_out) / tracked * 100) if tracked else None
+
+    # --- 2. Expired medicines and their cost ------------------------------
+    expired_lines = list(db['transactions'].find(
+        {'type': 'expiry_removal', 'timestamp': {'$gte': start, '$lt': end}},
+        {'_id': 0, 'med_name': 1, 'quantity': 1, 'price': 1, 'line_value': 1}))
+    by_med: dict[str, float] = {}
+    for w in expired_lines:
+        units = abs(w.get('quantity', 0) or 0)
+        v = abs(w['line_value']) if w.get('line_value') is not None \
+            else units * (w.get('price', 0) or 0)
+        by_med[w.get('med_name', '')] = by_med.get(w.get('med_name', ''), 0.0) + v
+    expired_value = sum(by_med.values())
+
+    # --- 3. Full stock counts, year to date --------------------------------
+    # Two a year, so a single month says little: count every stock take closed
+    # from 1 January to the end of the chosen month, and call it full only if
+    # it covered most of the items on the books (all categories).
+    year_start, _ = _local_month_bounds(y, 1)
+    on_books = db['medications'].count_documents(_active()) or 1
+    full_counts, partial_counts = [], []
+    for st in db['stock_takes'].find(
+            {'status': 'closed', 'closed_at': {'$gte': year_start, '$lt': end}},
+            {'reference': 1, 'closed_at': 1}).sort('closed_at', 1):
+        counted = len(db['stock_take_counts'].distinct(
+            'med_name', {'stock_take_id': str(st['_id']), 'counted': {'$ne': None}}))
+        cover = counted / on_books * 100
+        entry = {'reference': st.get('reference'), 'coverage': f'{min(cover, 100):.0f}%',
+                 'closed': to_local(st.get('closed_at'), '%d %b')}
+        (full_counts if cover >= FULL_COUNT_COVERAGE_PCT else partial_counts).append(entry)
+    # Due by now: one by the end of June, two by the end of December.
+    st_due = m * FULL_COUNTS_PER_YEAR // 12
+
+    # --- 4. Medication errors -------------------------------------------------
+    errors = list(db['medication_errors'].find({'date': {'$gte': start, '$lt': end}}))
+    err_types = Counter(e.get('error_type', 'Other') for e in errors)
+
+    return {
+        'label': datetime(y, m, 1).strftime('%B %Y'),
+        'tracked': tracked,
+        'stocked_out': stocked_out,
+        'dormant': dormant, 'dormant_months': STOCKOUT_DORMANT_MONTHS,
+        'stockout_pct': f'{so_pct:.1f}%' if so_pct is not None else '-',
+        'stockout_objective': f'{STOCKOUT_OBJECTIVE_PCT:g}%',
+        'stockout_met': so_pct is not None and so_pct <= STOCKOUT_OBJECTIVE_PCT,
+        'expired_items': len(by_med),
+        'expired_lines': len(expired_lines),
+        'expired_value': f'M{expired_value:,.2f}',
+        'expired_by_med': sorted(by_med.items(), key=lambda kv: -kv[1])[:10],
+        'year': y,
+        'st_done': len(full_counts), 'st_expected': FULL_COUNTS_PER_YEAR,
+        'st_due': st_due, 'st_on_track': len(full_counts) >= st_due,
+        'st_full': full_counts, 'st_partial': partial_counts,
+        'st_coverage_rule': f'{FULL_COUNT_COVERAGE_PCT:g}%',
+        'errors': len(errors),
+        'error_types': sorted(err_types.items(), key=lambda kv: -kv[1]),
+    }
+
+
+@app.route('/meeting-log', methods=['GET', 'POST'])
+@login_required
+def meeting_log() -> ResponseReturnValue:
+    """Medication errors: the meeting indicator that has no other record in
+    the app."""
+    if session['user'].get('role') == 'department':
+        return redirect('/requests')
+    current_user = session['user']['name']
+    is_admin = session['user'].get('role') == 'admin'
+    message_class, message = _flashed_banner()
+    db = get_mongo_client()[DB_NAME]
+    errs = db['medication_errors']
+
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action == 'add_error':
+            when, problem = _entry_time(request.form.get('date', ''))
+            if when is None:
+                flash(problem)
+                return redirect(url_for('meeting_log'))
+            etype = request.form.get('error_type')
+            desc = (request.form.get('description') or '').strip()
+            if etype not in MED_ERROR_TYPES or not desc:
+                flash('Choose the type of error and describe what happened.')
+                return redirect(url_for('meeting_log'))
+            errs.insert_one({'date': when, 'error_type': etype, 'description': desc[:500],
+                             'action_taken': (request.form.get('action_taken') or '').strip()[:500],
+                             'recorded_by': current_user, 'timestamp': datetime.utcnow()})
+            write_audit_entry('CREATE', 'medication_error', etype, 'Medication error reported')
+            flash('Error report saved. Thank you for reporting it.', 'success')
+        elif action == 'delete_error' and is_admin:
+            try:
+                errs.delete_one({'_id': ObjectId(request.form.get('id', ''))})
+                write_audit_entry('DELETE', 'medication_error', request.form.get('id', ''), 'removed')
+                flash('Entry deleted.', 'success')
+            except (InvalidId, TypeError):
+                flash('That entry was not found.')
+        return redirect(url_for('meeting_log'))
+
+    since = datetime.utcnow() - timedelta(days=92)
+    return render_template(
+        'meeting_log.html', nav_links=get_nav_links(),
+        message=message, message_class=message_class, is_admin=is_admin,
+        today=local_now().strftime('%Y-%m-%d'),
+        error_types=MED_ERROR_TYPES,
+        errors=list(errs.find({'date': {'$gte': since}}).sort('date', -1)),
+    )
+
+
 @app.route('/dashboard', methods=['GET'])
 @login_required
 def dashboard() -> ResponseReturnValue:
@@ -6264,8 +6561,15 @@ def dashboard() -> ResponseReturnValue:
                 key=lambda n: -n['value']
             )[:25]
 
+        kpi_month = request.args.get('kpi_month') or _default_meeting_month()
+        kpi_choices = _meeting_month_choices()
+        if kpi_month not in [c[0] for c in kpi_choices]:
+            kpi_month = _default_meeting_month()
+        kpis = _meeting_kpis(db, int(kpi_month[:4]), int(kpi_month[5:]), cat)
+
         return render_template(
             'dashboard.html', nav_links=get_nav_links(), message=message,
+            kpis=kpis, kpi_month=kpi_month, kpi_choices=kpi_choices,
             is_admin=is_admin, month_labels=month_labels, months_back=months_back,
             month_choices=DASHBOARD_MONTH_CHOICES, sort_by=sort_by, limit=limit,
             search=search, category=cat, category_label=CATEGORY_LABELS[cat],
@@ -6638,6 +6942,13 @@ def stock_take() -> ResponseReturnValue:
                         by_row[int(k[5:])] = str(form.get(k) or '')
                 if not by_row:
                     by_row = dict(enumerate(request.form.getlist('med_name')))
+                # Rows that are only a tick come as one list of names, one
+                # per line (see the page's script), so ticking a whole
+                # sheet stays a small request. A row sent in full as well
+                # is handled with its row.
+                sent_rows = set(by_row.values())
+                tick_only = [n.strip() for n in str(form.get('agreed') or '').splitlines()
+                             if n.strip() and n.strip() not in sent_rows]
                 names = list(by_row.values())
                 posted = agreed = short = over = skipped = 0
                 details_only = detail_changes = bad_dates = confirmed = 0
@@ -6707,6 +7018,13 @@ def stock_take() -> ResponseReturnValue:
                     else:
                         over += 1
 
+                if tick_only:
+                    n_ok, n_missing = _record_agreed_many(medications, counts_col, st,
+                                                          tick_only, current_user)
+                    posted += n_ok
+                    agreed += n_ok
+                    confirmed += n_ok
+                    skipped += len(n_missing)
                 if posted:
                     msg = (f'{posted} count(s) posted to {st["reference"]}: '
                            f'{agreed} agreed, {short} short, {over} over.')
@@ -6876,6 +7194,25 @@ def stock_take() -> ResponseReturnValue:
                 rows_out = [r for r in sheet if r['group'] == grp] if grp in labels else sheet
                 title = labels.get(grp, 'Count sheet')
                 slug = ('-' + title.lower().replace(' ', '-')) if grp in labels else ''
+                if request.values.get('format') == 'csv':
+                    # The same sheet as plain CSV, for the Stock Take phone
+                    # app: it imports this, counts item by item, and exports
+                    # the same columns back for the upload here. Expiry is
+                    # written dd/mm/yyyy, the way the app and the upload read it.
+                    out = io.StringIO()
+                    w = csv.writer(out)
+                    w.writerow(['Code', 'Medication', 'On system', 'Physical count',
+                                'Expiry date', 'Batch', 'Note', 'Group'])
+                    for r in rows_out:
+                        exp = _expiry_iso(r['expiry']) if r['expiry'] else ''
+                        w.writerow([r['code'] or '', r['name'], r['balance'], '',
+                                    datetime.strptime(exp, '%Y-%m-%d').strftime('%d/%m/%Y') if exp else '',
+                                    r['batch'] or '', '', labels.get(r['group'], '')])
+                    resp = make_response(out.getvalue().encode('utf-8-sig'))
+                    resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
+                    resp.headers['Content-Disposition'] = (
+                        f'attachment; filename="{active["reference"]}-count-sheet{slug}.csv"')
+                    return resp
                 return _xlsx_download(
                     f"{active['reference']}-count-sheet{slug}.xlsx", title,
                     ['Code', 'Medication', 'On system', 'Physical count', 'Expiry date', 'Batch', 'Note'],
@@ -6925,6 +7262,55 @@ def stock_take() -> ResponseReturnValue:
             active=None, sessions=[], counts=[], med_names=[], uncounted=[],
             agreed_count=0, issued_not_recorded=0, recorded_not_issued=0,
         ), 500
+
+
+def _record_agreed_many(medications: Collection, counts_col: Collection, st: Doc,
+                        names: list[str], user: str) -> tuple[int, list[str]]:
+    """Record many "shelf agrees with the system" ticks in a few requests.
+
+    The same line _record_count writes for a tick with nothing else on the
+    row, but for a whole sheet at once. Ticking every row of a long sheet
+    used to send each row in full and save each tick with its own three
+    database requests: the request was too big for Vercel, and the saving
+    would have run past its time limit. Here the balances are read in one
+    query, the lines go in with one insert, and the audit gets one entry.
+    A tick moves no stock, so nothing is posted to the ledger.
+
+    Items already counted in this stock take are left alone, so pressing
+    Post Counts twice does not confirm anything twice. Returns how many were
+    recorded and the names not found.
+    """
+    wanted = list(dict.fromkeys(n for n in names if n))
+    if not wanted:
+        return 0, []
+    sid = str(st['_id'])
+    done = set(counts_col.distinct('med_name', {'stock_take_id': sid,
+                                                'counted': {'$ne': None}}))
+    found = {m['name']: m for m in medications.find(
+        {'name': {'$in': wanted}}, {'_id': 0, 'name': 1, 'balance': 1})}
+    missing = [n for n in wanted if n not in found]
+    now = datetime.utcnow()
+    lines = []
+    for n in wanted:
+        if n in found and n not in done:
+            bal = found[n].get('balance', 0)
+            lines.append({
+                'stock_take_id': sid, 'reference': st['reference'],
+                'med_name': n, 'system_balance': bal, 'counted': bal,
+                'variance': 0, 'discrepancy_type': classify_variance(0),
+                'note': '', 'counted_by': user, 'timestamp': now,
+                'method': 'confirmed'})
+    if lines:
+        counts_col.insert_many(lines)
+        write_audit_entry('UPDATE', 'stock_take_count', f"{st['reference']} / {len(lines)} item(s)",
+                          f'confirmed: shelf agrees with the system for {len(lines)} item(s): '
+                          + _brief([x['med_name'] for x in lines], 10))
+    if missing:
+        write_app_warning(
+            'medication_not_found',
+            f'{len(missing)} ticked medication(s) not found during stock take {st["reference"]}.',
+            {'med_names': missing[:50], 'stock_take': st['reference']})
+    return len(lines), missing
 
 
 def _record_count(medications: Collection, transactions: Collection,
