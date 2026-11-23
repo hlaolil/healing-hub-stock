@@ -191,6 +191,15 @@ A.SHOP_MODE = False
 A.get_mongo_client = lambda _client=_f: _client
 db['sync_control'].delete_many({})
 
+print('\n--- 4b. Duplicate usernames ---')
+login()
+db['users'].insert_many([{'username': 'dup', 'role': 'admin'}, {'username': 'dup', 'role': 'admin'},
+                         {'username': 'one', 'role': 'employee'}])
+check('duplicate usernames are found', A.duplicate_usernames(db) == ['dup'], A.duplicate_usernames(db))
+check('Owner Reports warns about them', 'share the username dup' in c.get('/owner-reports').get_data(as_text=True))
+db['users'].delete_many({'username': {'$in': ['dup', 'one']}})
+check('no warning once fixed', 'share the username' not in c.get('/owner-reports').get_data(as_text=True))
+
 print('\n--- 5. WhatsApp numbers and links ---')
 check('a local number gets 266', A.wa_number('5812 3456') == '26658123456')
 check('+266 and 00266 are understood', A.wa_number('+266 5812-3456') == '26658123456'

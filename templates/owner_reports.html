@@ -21,6 +21,12 @@ shop and online. The shop's version was kept; please check them (for stock items
 <ul>{% for c in u.last.conflicts %}<li>{{ c }}</li>{% endfor %}</ul></div>
 {% endif %}
 
+{% if duplicate_users %}
+<div class="message error">Two or more accounts share the username {{ duplicate_users|join(', ') }}.
+That person may not be able to log in. This happens when the same name was registered separately in the
+shop and online. Keep the newer account, delete the other in the shop, then upload.</div>
+{% endif %}
+
 {% if in_shop %}
     {% if u.holder == 'online' %}
 <p>Connect this computer to the network, then bring the records back. Everything changed online comes down,

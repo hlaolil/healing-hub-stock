@@ -8636,6 +8636,7 @@ def owner_reports() -> ResponseReturnValue:
                            owner_whatsapp=wa_number(owner_wa), email_on=bool(_gmail()),
                            in_shop=SHOP_MODE and cloud_configured(), side=this_side(),
                            read_only=read_only_now(), upload=upload_status(db),
+                           duplicate_users=duplicate_usernames(db),
                            suppliers=supplier_prices(db), owner_email=owner_email_address(),
                            markup_percent=MARKUP_PERCENT, pct=_pct,
                            weekly_day=(os.getenv('WEEKLY_ALERT_DAY') or 'Thu')[:3].title())
@@ -8919,6 +8920,14 @@ def emergency_take_control(db: Any, by: str) -> None:
     set_baton(db, this_side(), by, emergency=True)
     db['sync_log'].insert_one({'at': datetime.utcnow(), 'by': by, 'ok': False,
                                'emergency': this_side()})
+
+
+def duplicate_usernames(db: Any) -> list[str]:
+    """Usernames held by more than one account. This can only happen when the
+    same name was registered separately in the shop and online before they
+    first synced; login would then check the wrong password."""
+    return sorted(r['_id'] for r in db['users'].aggregate([
+        {'$group': {'_id': '$username', 'n': {'$sum': 1}}}, {'$match': {'n': {'$gt': 1}}}]))
 
 
 def upload_status(db: Any) -> Doc:
