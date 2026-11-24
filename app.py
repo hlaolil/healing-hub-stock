@@ -575,7 +575,16 @@ SESSION_GUARD_JS = """
 </script>
 """
 
+def website_nav_link() -> str:
+    """A 'Website' link to the public site, when WEBSITE_URL is set; opens in a new tab."""
+    url = (os.getenv('WEBSITE_URL') or '').strip()
+    if not re.match(r'https?://', url, re.I):
+        return ''
+    return f'<a href="{escape(url)}" target="_blank" rel="noopener">Website</a> | '
+
+
 def get_nav_links() -> str:
+    site_link = website_nav_link()
     if 'user' in session:
         user = session['user']
         is_admin = user.get('role') == 'admin'
@@ -602,13 +611,14 @@ def get_nav_links() -> str:
             {stock_take_link}
             {owner_link}
             {audit_link}
+            {site_link}
             <span>Welcome, {name}! <a href="/logout">Logout</a></span>
         </p>
         """ + upload_banner(is_admin) + SESSION_GUARD_JS.replace('__TIMEOUT__', str(SESSION_TIMEOUT_MINUTES))
     else:
-        return """
+        return f"""
         <p class="nav-links"><strong>Navigate:</strong>
-            <a href="/login">Login</a> | <a href="/register">Register</a>
+            {site_link}<a href="/login">Login</a> | <a href="/register">Register</a>
         </p>
         """
 
